@@ -1,0 +1,1599 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+
+void main() {
+  runApp(const SanareMobileApp());
+}
+
+class SanareMobileApp extends StatelessWidget {
+  const SanareMobileApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    const primary = Color(0xFF087F7A);
+
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Sanare IA',
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: primary,
+          primary: primary,
+          secondary: const Color(0xFFE7793F),
+          tertiary: const Color(0xFF4E6EAB),
+          surface: const Color(0xFFF7F9F8),
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF7F9F8),
+        appBarTheme: const AppBarTheme(
+          centerTitle: false,
+          elevation: 0,
+          backgroundColor: Color(0xFFF7F9F8),
+          foregroundColor: Color(0xFF17212B),
+        ),
+        cardTheme: CardThemeData(
+          color: Colors.white,
+          elevation: 0,
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: const BorderSide(color: Color(0xFFE2E8E6)),
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: Color(0xFFD8E1DF)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: Color(0xFFD8E1DF)),
+          ),
+        ),
+      ),
+      home: const LoginScreen(),
+    );
+  }
+}
+
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final tenantController = TextEditingController();
+  final emailController = TextEditingController();
+  final passwordController = TextEditingController();
+  bool isLoading = false;
+
+  @override
+  void dispose() {
+    tenantController.dispose();
+    emailController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _login() async {
+    final apiClient = ApiClient(tenantDomain: tenantController.text.trim());
+
+    if (emailController.text.trim().isEmpty ||
+        passwordController.text.trim().isEmpty) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => MobileShell(apiClient: apiClient)),
+      );
+      return;
+    }
+
+    setState(() => isLoading = true);
+    try {
+      final session = await apiClient.login(
+        email: emailController.text.trim(),
+        password: passwordController.text,
+      );
+
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => MobileShell(apiClient: apiClient, session: session),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo iniciar sesion: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(22),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF087F7A),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(Icons.graphic_eq, color: Colors.white, size: 40),
+                        SizedBox(height: 24),
+                        Text(
+                          'Sanare IA',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 31,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        SizedBox(height: 6),
+                        Text(
+                          'Graba la consulta y genera el resumen clinico.',
+                          style: TextStyle(color: Color(0xFFE5FFFB)),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  const Text(
+                    'Entrar a la clinica',
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Prototipo conectado solo a medico, paciente y consulta.',
+                    style: TextStyle(color: Colors.grey.shade700),
+                  ),
+                  const SizedBox(height: 24),
+                  TextField(
+                    controller: tenantController,
+                    decoration: const InputDecoration(
+                      labelText: 'Dominio de la clinica',
+                      prefixIcon: Icon(Icons.domain_outlined),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'Correo medico',
+                      prefixIcon: Icon(Icons.mail_outline),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: passwordController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Contrasena',
+                      prefixIcon: Icon(Icons.lock_outline),
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: FilledButton.icon(
+                      onPressed: isLoading ? null : _login,
+                      icon: isLoading
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.login),
+                      label: Text(isLoading ? 'Conectando...' : 'Ingresar'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class MobileShell extends StatefulWidget {
+  const MobileShell({super.key, required this.apiClient, this.session});
+
+  final ApiClient apiClient;
+  final ApiSession? session;
+
+  @override
+  State<MobileShell> createState() => _MobileShellState();
+}
+
+class _MobileShellState extends State<MobileShell> {
+  int index = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final screens = [
+      AiConsultationScreen(apiClient: widget.apiClient),
+      PatientsScreen(apiClient: widget.apiClient),
+      HistoryScreen(apiClient: widget.apiClient),
+      AccountScreen(session: widget.session),
+    ];
+
+    return Scaffold(
+      body: screens[index],
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: index,
+        onDestinationSelected: (value) => setState(() => index = value),
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.mic_none),
+            selectedIcon: Icon(Icons.mic),
+            label: 'Consulta',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.people_outline),
+            selectedIcon: Icon(Icons.people),
+            label: 'Pacientes',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.picture_as_pdf_outlined),
+            selectedIcon: Icon(Icons.picture_as_pdf),
+            label: 'PDF',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.person_outline),
+            selectedIcon: Icon(Icons.person),
+            label: 'Perfil',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AiConsultationScreen extends StatefulWidget {
+  const AiConsultationScreen({super.key, required this.apiClient});
+
+  final ApiClient apiClient;
+
+  @override
+  State<AiConsultationScreen> createState() => _AiConsultationScreenState();
+}
+
+class _AiConsultationScreenState extends State<AiConsultationScreen> {
+  Patient selectedPatient = mockPatients.first;
+  bool isRecording = false;
+  bool hasGeneratedSummary = true;
+  bool isSaving = false;
+
+  Future<void> _saveConsultation() async {
+    if (!widget.apiClient.isAuthenticated) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Modo demo: inicia sesion para guardar en Sanare.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => isSaving = true);
+    try {
+      await widget.apiClient.createConsultation(
+        pacienteId: selectedPatient.id,
+        diagnostico:
+            'Cuadro compatible con rinitis alergica sin datos de alarma respiratoria.',
+        tratamiento: 'Antihistaminico oral por 7 dias, lavado nasal y control.',
+        observaciones: 'Evitar polvo y registrar evolucion de sintomas.',
+        transcripcion:
+            'Paciente refiere congestion nasal, estornudos frecuentes y picazon ocular desde hace tres dias.',
+        resumenIa:
+            'Paciente con sintomas compatibles con rinitis alergica. Se indica manejo sintomatico y control si no hay mejoria.',
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Consulta guardada en Sanare.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('No se pudo guardar: $error')));
+    } finally {
+      if (mounted) setState(() => isSaving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AppScaffold(
+      title: 'Consulta IA',
+      subtitle: 'Grabar, resumir y generar PDF',
+      actions: [
+        IconButton(
+          tooltip: 'Nueva consulta',
+          onPressed: () {
+            setState(() {
+              isRecording = false;
+              hasGeneratedSummary = false;
+            });
+          },
+          icon: const Icon(Icons.add_circle_outline),
+        ),
+      ],
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
+        children: [
+          PatientSelector(
+            selectedPatient: selectedPatient,
+            apiClient: widget.apiClient,
+            onSelected: (patient) {
+              setState(() => selectedPatient = patient);
+            },
+          ),
+          const SizedBox(height: 16),
+          RecordingPanel(
+            isRecording: isRecording,
+            onToggle: () {
+              setState(() {
+                isRecording = !isRecording;
+                if (!isRecording) {
+                  hasGeneratedSummary = true;
+                }
+              });
+            },
+          ),
+          const SizedBox(height: 16),
+          const WorkflowStatus(),
+          const SizedBox(height: 16),
+          if (hasGeneratedSummary) const AiSummaryCard(),
+          if (hasGeneratedSummary) const SizedBox(height: 16),
+          if (hasGeneratedSummary)
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: isSaving ? null : _saveConsultation,
+                    icon: isSaving
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_outlined),
+                    label: Text(isSaving ? 'Guardando...' : 'Guardar consulta'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () {},
+                    icon: const Icon(Icons.picture_as_pdf_outlined),
+                    label: const Text('PDF'),
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class PatientsScreen extends StatelessWidget {
+  const PatientsScreen({super.key, required this.apiClient});
+
+  final ApiClient apiClient;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppScaffold(
+      title: 'Pacientes',
+      subtitle: 'Seleccion para consulta IA',
+      actions: [
+        IconButton(
+          tooltip: 'Nuevo paciente',
+          onPressed: () {},
+          icon: const Icon(Icons.person_add_alt_outlined),
+        ),
+      ],
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
+        children: [
+          const SearchBox(label: 'Buscar por nombre, DNI o telefono'),
+          const SizedBox(height: 16),
+          FutureBuilder<List<Patient>>(
+            future: apiClient.isAuthenticated
+                ? apiClient.fetchPatients()
+                : Future.value(mockPatients),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: CircularProgressIndicator(),
+                  ),
+                );
+              }
+
+              final patients = snapshot.data ?? mockPatients;
+              return Column(
+                children: patients
+                    .map(
+                      (patient) => PatientTile(
+                        patient: patient,
+                        onTap: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  PatientDetailScreen(patient: patient),
+                            ),
+                          );
+                        },
+                      ),
+                    )
+                    .toList(),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class HistoryScreen extends StatelessWidget {
+  const HistoryScreen({super.key, required this.apiClient});
+
+  final ApiClient apiClient;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppScaffold(
+      title: 'Consultas y PDF',
+      subtitle: 'Resumenes generados por IA',
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
+        children: [
+          const SearchBox(label: 'Buscar consulta o paciente'),
+          const SizedBox(height: 16),
+          FutureBuilder<List<ConsultationSummary>>(
+            future: apiClient.isAuthenticated
+                ? apiClient.fetchConsultations()
+                : Future.value(mockConsultations),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: CircularProgressIndicator(),
+                  ),
+                );
+              }
+
+              final consultations = snapshot.data ?? mockConsultations;
+              return Column(
+                children: consultations
+                    .map(
+                      (consultation) => ConsultationPdfCard(
+                        patient: consultation.patient,
+                        title: consultation.title,
+                        date: consultation.date,
+                        status: consultation.status,
+                        pdfUrl: consultation.pdfUrl,
+                      ),
+                    )
+                    .toList(),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AccountScreen extends StatelessWidget {
+  const AccountScreen({super.key, this.session});
+
+  final ApiSession? session;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppScaffold(
+      title: 'Perfil medico',
+      subtitle: 'Datos consumidos desde Sanare',
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 32,
+                    backgroundColor: Theme.of(context).colorScheme.primary,
+                    child: const Text(
+                      'MH',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 20,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          session?.doctorName ?? 'Dra. Maria Hernandez',
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(session?.doctorEmail ?? 'Medicina general'),
+                        const Text('Colegiacion: 28473'),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          const SettingsTile(
+            icon: Icons.api_outlined,
+            title: 'APIs del prototipo',
+            value: 'Auth, medico, paciente, consulta',
+          ),
+          const SettingsTile(
+            icon: Icons.graphic_eq,
+            title: 'Motor IA',
+            value: 'Transcripcion + resumen clinico',
+          ),
+          const SettingsTile(
+            icon: Icons.picture_as_pdf_outlined,
+            title: 'Salida',
+            value: 'PDF de resumen de consulta',
+          ),
+          const SizedBox(height: 20),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
+                (_) => false,
+              );
+            },
+            icon: const Icon(Icons.logout),
+            label: const Text('Cerrar sesion'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class PatientDetailScreen extends StatelessWidget {
+  const PatientDetailScreen({super.key, required this.patient});
+
+  final Patient patient;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppScaffold(
+      title: patient.name,
+      subtitle: 'Datos minimos para consulta',
+      actions: [
+        IconButton(
+          tooltip: 'Editar',
+          onPressed: () {},
+          icon: const Icon(Icons.edit_outlined),
+        ),
+      ],
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
+        children: [
+          PatientSummary(patient: patient),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: () {},
+            icon: const Icon(Icons.mic_outlined),
+            label: const Text('Iniciar consulta grabada'),
+          ),
+          const SizedBox(height: 18),
+          const SectionTitle(title: 'Ultimos resumenes'),
+          const SizedBox(height: 10),
+          const ActivityTile(
+            icon: Icons.auto_awesome_outlined,
+            color: Color(0xFF087F7A),
+            title: 'Resumen IA',
+            body: 'Rinitis alergica, control y tratamiento.',
+            time: 'Hoy',
+          ),
+          const ActivityTile(
+            icon: Icons.picture_as_pdf_outlined,
+            color: Color(0xFFE7793F),
+            title: 'PDF generado',
+            body: 'Consulta #1042',
+            time: 'Hoy',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class PatientSelector extends StatelessWidget {
+  const PatientSelector({
+    super.key,
+    required this.selectedPatient,
+    required this.apiClient,
+    required this.onSelected,
+  });
+
+  final Patient selectedPatient;
+  final ApiClient apiClient;
+  final ValueChanged<Patient> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Paciente de la consulta',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 12),
+            FutureBuilder<List<Patient>>(
+              future: apiClient.isAuthenticated
+                  ? apiClient.fetchPatients()
+                  : Future.value(mockPatients),
+              builder: (context, snapshot) {
+                final patients = snapshot.data ?? mockPatients;
+                final value =
+                    patients.any((item) => item.id == selectedPatient.id)
+                    ? patients.firstWhere(
+                        (item) => item.id == selectedPatient.id,
+                      )
+                    : patients.first;
+
+                return DropdownButtonFormField<Patient>(
+                  initialValue: value,
+                  decoration: const InputDecoration(
+                    labelText: 'Seleccionar paciente',
+                    prefixIcon: Icon(Icons.person_search_outlined),
+                  ),
+                  items: patients
+                      .map(
+                        (patient) => DropdownMenuItem(
+                          value: patient,
+                          child: Text(patient.name),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (patient) {
+                    if (patient != null) onSelected(patient);
+                  },
+                );
+              },
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: InfoPill(
+                    icon: Icons.badge_outlined,
+                    text: selectedPatient.dni,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                InfoPill(
+                  icon: Icons.bloodtype_outlined,
+                  text: selectedPatient.bloodType,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class RecordingPanel extends StatelessWidget {
+  const RecordingPanel({
+    super.key,
+    required this.isRecording,
+    required this.onToggle,
+  });
+
+  final bool isRecording;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = isRecording
+        ? const Color(0xFFD94A38)
+        : Theme.of(context).colorScheme.primary;
+    final label = isRecording ? 'Detener grabacion' : 'Iniciar grabacion';
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          children: [
+            Container(
+              width: 126,
+              height: 126,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: .12),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.mic, color: color, size: 62),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              isRecording ? '00:03:24' : 'Listo para grabar',
+              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              isRecording
+                  ? 'Escuchando la consulta medico-paciente'
+                  : 'El audio se enviara para transcripcion y resumen IA',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade700),
+            ),
+            const SizedBox(height: 18),
+            SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: color),
+                onPressed: onToggle,
+                icon: Icon(isRecording ? Icons.stop : Icons.mic_none),
+                label: Text(label),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class WorkflowStatus extends StatelessWidget {
+  const WorkflowStatus({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const Card(
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Flujo del prototipo',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
+            ),
+            SizedBox(height: 14),
+            FlowStep(
+              icon: Icons.mic_none,
+              title: '1. Grabar audio',
+              body: 'Consulta capturada desde el telefono',
+            ),
+            FlowStep(
+              icon: Icons.text_snippet_outlined,
+              title: '2. Transcribir',
+              body: 'Audio convertido a texto clinico',
+            ),
+            FlowStep(
+              icon: Icons.auto_awesome_outlined,
+              title: '3. Resumir con IA',
+              body: 'Diagnostico, tratamiento y observaciones',
+            ),
+            FlowStep(
+              icon: Icons.picture_as_pdf_outlined,
+              title: '4. Generar PDF',
+              body: 'Documento final para expediente',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class FlowStep extends StatelessWidget {
+  const FlowStep({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.body,
+  });
+
+  final IconData icon;
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 2),
+                Text(body, style: TextStyle(color: Colors.grey.shade700)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AiSummaryCard extends StatelessWidget {
+  const AiSummaryCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.auto_awesome,
+                  color: Theme.of(context).colorScheme.secondary,
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Resumen generado por IA',
+                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
+                  ),
+                ),
+                const StatusBadge(text: 'Borrador'),
+              ],
+            ),
+            const SizedBox(height: 14),
+            const SummaryBlock(
+              title: 'Motivo de consulta',
+              body:
+                  'Paciente refiere congestion nasal, estornudos frecuentes y picazon ocular desde hace tres dias.',
+            ),
+            const SummaryBlock(
+              title: 'Impresion diagnostica',
+              body:
+                  'Cuadro compatible con rinitis alergica sin datos de alarma respiratoria.',
+            ),
+            const SummaryBlock(
+              title: 'Tratamiento sugerido',
+              body:
+                  'Antihistaminico oral por 7 dias, lavado nasal y control si persisten sintomas.',
+            ),
+            const SummaryBlock(
+              title: 'Observaciones',
+              body:
+                  'Se recomienda evitar polvo, perfumes intensos y registrar evolucion.',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SummaryBlock extends StatelessWidget {
+  const SummaryBlock({super.key, required this.title, required this.body});
+
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 4),
+          Text(body),
+        ],
+      ),
+    );
+  }
+}
+
+class ConsultationPdfCard extends StatelessWidget {
+  const ConsultationPdfCard({
+    super.key,
+    required this.patient,
+    required this.title,
+    required this.date,
+    required this.status,
+    this.pdfUrl,
+  });
+
+  final String patient;
+  final String title;
+  final String date;
+  final String status;
+  final String? pdfUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Card(
+        child: ListTile(
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: 10,
+          ),
+          leading: CircleAvatar(
+            backgroundColor: const Color(0xFFE9F1FF),
+            child: Icon(
+              Icons.picture_as_pdf_outlined,
+              color: Theme.of(context).colorScheme.tertiary,
+            ),
+          ),
+          title: Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.w900),
+          ),
+          subtitle: Text('$patient\n$date'),
+          isThreeLine: true,
+          trailing: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.download_outlined),
+              const SizedBox(height: 2),
+              Text(
+                pdfUrl == null ? status : 'Abrir PDF',
+                style: const TextStyle(fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class AppScaffold extends StatelessWidget {
+  const AppScaffold({
+    super.key,
+    required this.title,
+    required this.child,
+    this.subtitle,
+    this.actions,
+  });
+
+  final String title;
+  final String? subtitle;
+  final Widget child;
+  final List<Widget>? actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        toolbarHeight: 78,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
+            if (subtitle != null)
+              Text(
+                subtitle!,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w400,
+                  color: Colors.grey.shade700,
+                ),
+              ),
+          ],
+        ),
+        actions: actions,
+      ),
+      body: SafeArea(top: false, child: child),
+    );
+  }
+}
+
+class SearchBox extends StatelessWidget {
+  const SearchBox({super.key, required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      decoration: InputDecoration(
+        hintText: label,
+        prefixIcon: const Icon(Icons.search),
+        suffixIcon: IconButton(
+          tooltip: 'Filtros',
+          onPressed: () {},
+          icon: const Icon(Icons.tune),
+        ),
+      ),
+    );
+  }
+}
+
+class PatientTile extends StatelessWidget {
+  const PatientTile({super.key, required this.patient, required this.onTap});
+
+  final Patient patient;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Card(
+        child: ListTile(
+          onTap: onTap,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: 8,
+          ),
+          leading: CircleAvatar(
+            backgroundColor: const Color(0xFFDAF4F1),
+            child: Text(
+              patient.initials,
+              style: const TextStyle(
+                color: Color(0xFF087F7A),
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          title: Text(
+            patient.name,
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+          subtitle: Text('${patient.dni} - ${patient.phone}'),
+          trailing: const Icon(Icons.chevron_right),
+        ),
+      ),
+    );
+  }
+}
+
+class PatientSummary extends StatelessWidget {
+  const PatientSummary({super.key, required this.patient});
+
+  final Patient patient;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 31,
+                  backgroundColor: const Color(0xFFDAF4F1),
+                  child: Text(
+                    patient.initials,
+                    style: const TextStyle(
+                      color: Color(0xFF087F7A),
+                      fontWeight: FontWeight.w900,
+                      fontSize: 20,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        patient.name,
+                        style: const TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(patient.dni),
+                      Text(patient.phone),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 28),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                InfoPill(
+                  icon: Icons.bloodtype_outlined,
+                  text: patient.bloodType,
+                ),
+                InfoPill(
+                  icon: Icons.cake_outlined,
+                  text: '${patient.age} anos',
+                ),
+                const InfoPill(
+                  icon: Icons.warning_amber_outlined,
+                  text: 'Sin alertas',
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class InfoPill extends StatelessWidget {
+  const InfoPill({super.key, required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1F5F4),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 17, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              text,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class StatusBadge extends StatelessWidget {
+  const StatusBadge({super.key, required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF0E8),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Color(0xFFE7793F),
+          fontWeight: FontWeight.w800,
+          fontSize: 12,
+        ),
+      ),
+    );
+  }
+}
+
+class ActivityTile extends StatelessWidget {
+  const ActivityTile({
+    super.key,
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.body,
+    required this.time,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String body;
+  final String time;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Card(
+        child: ListTile(
+          leading: CircleAvatar(
+            backgroundColor: color.withValues(alpha: .12),
+            child: Icon(icon, color: color),
+          ),
+          title: Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+          subtitle: Text(body, maxLines: 1, overflow: TextOverflow.ellipsis),
+          trailing: Text(time, style: TextStyle(color: Colors.grey.shade700)),
+        ),
+      ),
+    );
+  }
+}
+
+class SectionTitle extends StatelessWidget {
+  const SectionTitle({super.key, required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      title,
+      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+    );
+  }
+}
+
+class SettingsTile extends StatelessWidget {
+  const SettingsTile({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Card(
+        child: ListTile(
+          leading: Icon(icon, color: Theme.of(context).colorScheme.primary),
+          title: Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+          subtitle: Text(value),
+          trailing: const Icon(Icons.chevron_right),
+        ),
+      ),
+    );
+  }
+}
+
+class Patient {
+  const Patient({
+    required this.id,
+    required this.name,
+    required this.dni,
+    required this.phone,
+    required this.age,
+    required this.bloodType,
+  });
+
+  final int id;
+  final String name;
+  final String dni;
+  final String phone;
+  final int age;
+  final String bloodType;
+
+  factory Patient.fromJson(Map<String, dynamic> json) {
+    return Patient(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      name: json['nombre']?.toString() ?? 'Paciente sin nombre',
+      dni: json['dni']?.toString() ?? 'Sin DNI',
+      phone: json['telefono']?.toString() ?? 'Sin telefono',
+      age: _ageFromDate(json['fecha_nacimiento']?.toString()),
+      bloodType: json['grupo_sanguineo']?.toString() ?? 'No especificado',
+    );
+  }
+
+  String get initials {
+    final parts = name.split(' ');
+    return '${parts.first[0]}${parts.length > 1 ? parts.last[0] : ''}';
+  }
+}
+
+const mockPatients = [
+  Patient(
+    id: 1,
+    name: 'Ana Lopez',
+    dni: '0801-1994-02341',
+    phone: '+504 9876-1234',
+    age: 31,
+    bloodType: 'O+',
+  ),
+  Patient(
+    id: 2,
+    name: 'Carlos Mejia',
+    dni: '0801-1982-11245',
+    phone: '+504 9456-7788',
+    age: 44,
+    bloodType: 'A+',
+  ),
+  Patient(
+    id: 3,
+    name: 'Rosa Martinez',
+    dni: '0501-1976-88412',
+    phone: '+504 3321-9087',
+    age: 49,
+    bloodType: 'B-',
+  ),
+  Patient(
+    id: 4,
+    name: 'Luis Fernandez',
+    dni: '1101-2001-77122',
+    phone: '+504 8899-1020',
+    age: 25,
+    bloodType: 'AB+',
+  ),
+];
+
+class ConsultationSummary {
+  const ConsultationSummary({
+    required this.patient,
+    required this.title,
+    required this.date,
+    required this.status,
+    this.pdfUrl,
+  });
+
+  final String patient;
+  final String title;
+  final String date;
+  final String status;
+  final String? pdfUrl;
+
+  factory ConsultationSummary.fromJson(Map<String, dynamic> json) {
+    final patient = json['paciente'] is Map<String, dynamic>
+        ? json['paciente'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    final diagnosis = json['diagnostico']?.toString();
+
+    return ConsultationSummary(
+      patient: patient['nombre']?.toString() ?? 'Paciente',
+      title: diagnosis == null || diagnosis.isEmpty
+          ? 'Consulta generada por IA'
+          : diagnosis,
+      date: json['created_at']?.toString() ?? 'Sin fecha',
+      status: json['resumen_ia'] == null ? 'Guardado' : 'PDF listo',
+      pdfUrl: json['pdf_url']?.toString(),
+    );
+  }
+}
+
+const mockConsultations = [
+  ConsultationSummary(
+    patient: 'Ana Lopez',
+    title: 'Consulta por rinitis alergica',
+    date: 'Hoy, 10:30 AM',
+    status: 'PDF listo',
+  ),
+  ConsultationSummary(
+    patient: 'Carlos Mejia',
+    title: 'Control de hipertension arterial',
+    date: 'Ayer, 3:15 PM',
+    status: 'Guardado',
+  ),
+  ConsultationSummary(
+    patient: 'Rosa Martinez',
+    title: 'Dolor abdominal y gastritis',
+    date: '3 jun, 8:45 AM',
+    status: 'PDF listo',
+  ),
+];
+
+class ApiSession {
+  const ApiSession({
+    required this.token,
+    required this.doctorName,
+    required this.doctorEmail,
+  });
+
+  final String token;
+  final String doctorName;
+  final String doctorEmail;
+}
+
+class ApiClient {
+  ApiClient({required this.tenantDomain});
+
+  static const String baseUrl = String.fromEnvironment(
+    'SANARE_API_URL',
+    defaultValue: 'http://127.0.0.1:8000/api/v1/mobile',
+  );
+
+  final String tenantDomain;
+  String? _token;
+
+  bool get isAuthenticated => _token != null;
+
+  Map<String, String> get _headers {
+    return {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      if (tenantDomain.isNotEmpty) 'X-Tenant-Domain': tenantDomain,
+      if (_token != null) 'Authorization': 'Bearer $_token',
+    };
+  }
+
+  Future<ApiSession> login({
+    required String email,
+    required String password,
+  }) async {
+    final data = await _post('/auth/login', {
+      'email': email,
+      'password': password,
+      'device_name': 'sanare_mobile',
+    });
+
+    _token = data['access_token']?.toString();
+    if (_token == null || _token!.isEmpty) {
+      throw Exception('Respuesta sin token.');
+    }
+
+    final user = data['user'] is Map<String, dynamic>
+        ? data['user'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    final medico = data['medico'] is Map<String, dynamic>
+        ? data['medico'] as Map<String, dynamic>
+        : <String, dynamic>{};
+
+    return ApiSession(
+      token: _token!,
+      doctorName:
+          medico['nombre']?.toString() ?? user['name']?.toString() ?? 'Medico',
+      doctorEmail: user['email']?.toString() ?? email,
+    );
+  }
+
+  Future<List<Patient>> fetchPatients() async {
+    final data = await _get('/pacientes');
+    final items = data['data'] as List<dynamic>? ?? [];
+    return items
+        .whereType<Map<String, dynamic>>()
+        .map(Patient.fromJson)
+        .toList();
+  }
+
+  Future<List<ConsultationSummary>> fetchConsultations() async {
+    final data = await _get('/consultas');
+    final items = data['data'] as List<dynamic>? ?? [];
+    return items
+        .whereType<Map<String, dynamic>>()
+        .map(ConsultationSummary.fromJson)
+        .toList();
+  }
+
+  Future<void> createConsultation({
+    required int pacienteId,
+    required String diagnostico,
+    required String tratamiento,
+    required String observaciones,
+    required String transcripcion,
+    required String resumenIa,
+  }) async {
+    await _post('/consultas', {
+      'paciente_id': pacienteId,
+      'diagnostico': diagnostico,
+      'tratamiento': tratamiento,
+      'observaciones': observaciones,
+      'transcripcion': transcripcion,
+      'resumen_ia': resumenIa,
+      'resumen_ia_estructurado': {
+        'motivo': 'Congestion nasal, estornudos y picazon ocular.',
+        'diagnostico': diagnostico,
+        'tratamiento': tratamiento,
+        'observaciones': observaciones,
+      },
+    });
+  }
+
+  Future<Map<String, dynamic>> _get(String path) async {
+    final response = await http.get(
+      Uri.parse('$baseUrl$path'),
+      headers: _headers,
+    );
+    return _decode(response);
+  }
+
+  Future<Map<String, dynamic>> _post(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl$path'),
+      headers: _headers,
+      body: jsonEncode(body),
+    );
+    return _decode(response);
+  }
+
+  Map<String, dynamic> _decode(http.Response response) {
+    final body = response.body.isEmpty
+        ? <String, dynamic>{}
+        : jsonDecode(response.body) as Map<String, dynamic>;
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        body['message']?.toString() ?? 'HTTP ${response.statusCode}',
+      );
+    }
+
+    return body;
+  }
+}
+
+int _ageFromDate(String? date) {
+  if (date == null || date.isEmpty) return 0;
+  final birthDate = DateTime.tryParse(date);
+  if (birthDate == null) return 0;
+
+  final today = DateTime.now();
+  var age = today.year - birthDate.year;
+  final hadBirthday =
+      today.month > birthDate.month ||
+      (today.month == birthDate.month && today.day >= birthDate.day);
+  if (!hadBirthday) age--;
+  return age;
+}
