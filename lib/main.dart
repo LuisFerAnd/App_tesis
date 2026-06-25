@@ -12,7 +12,8 @@ class SanareMobileApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const primary = Color(0xFF087F7A);
+    const primary = Color(0xFF0A7F78);
+    const ink = Color(0xFF17212B);
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -24,14 +25,18 @@ class SanareMobileApp extends StatelessWidget {
           primary: primary,
           secondary: const Color(0xFFE7793F),
           tertiary: const Color(0xFF4E6EAB),
-          surface: const Color(0xFFF7F9F8),
+          surface: const Color(0xFFF6F8F7),
         ),
-        scaffoldBackgroundColor: const Color(0xFFF7F9F8),
+        scaffoldBackgroundColor: const Color(0xFFF6F8F7),
+        textTheme: ThemeData.light().textTheme.apply(
+          bodyColor: ink,
+          displayColor: ink,
+        ),
         appBarTheme: const AppBarTheme(
           centerTitle: false,
           elevation: 0,
-          backgroundColor: Color(0xFFF7F9F8),
-          foregroundColor: Color(0xFF17212B),
+          backgroundColor: Color(0xFFF6F8F7),
+          foregroundColor: ink,
         ),
         cardTheme: CardThemeData(
           color: Colors.white,
@@ -45,6 +50,10 @@ class SanareMobileApp extends StatelessWidget {
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
           fillColor: Colors.white,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 18,
+          ),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFFD8E1DF)),
@@ -52,6 +61,10 @@ class SanareMobileApp extends StatelessWidget {
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFFD8E1DF)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: primary, width: 1.6),
           ),
         ),
       ),
@@ -68,29 +81,23 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final tenantController = TextEditingController();
+  final formKey = GlobalKey<FormState>();
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
   bool isLoading = false;
+  bool passwordVisible = false;
 
   @override
   void dispose() {
-    tenantController.dispose();
     emailController.dispose();
     passwordController.dispose();
     super.dispose();
   }
 
   Future<void> _login() async {
-    final apiClient = ApiClient(tenantDomain: tenantController.text.trim());
+    if (!formKey.currentState!.validate()) return;
 
-    if (emailController.text.trim().isEmpty ||
-        passwordController.text.trim().isEmpty) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => MobileShell(apiClient: apiClient)),
-      );
-      return;
-    }
+    final apiClient = ApiClient();
 
     setState(() => isLoading = true);
     try {
@@ -115,103 +122,352 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  void _openDemo() {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => MobileShell(apiClient: ApiClient())),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    const primary = Color(0xFF0A7F78);
+    const deepInk = Color(0xFF17212B);
+
     return Scaffold(
       body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 430),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(22),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF087F7A),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Column(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(22, 18, 22, 24),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: 460,
+                    minHeight: constraints.maxHeight - 42,
+                  ),
+                  child: IntrinsicHeight(
+                    child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(Icons.graphic_eq, color: Colors.white, size: 40),
-                        SizedBox(height: 24),
-                        Text(
-                          'Sanare IA',
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(22),
+                          decoration: BoxDecoration(
+                            color: deepInk,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const SanareMark(),
+                                  const Spacer(),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 7,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withValues(
+                                        alpha: .12,
+                                      ),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: Colors.white.withValues(
+                                          alpha: .18,
+                                        ),
+                                      ),
+                                    ),
+                                    child: const Text(
+                                      'IA clinica',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 30),
+                              const Text(
+                                'Sanare IA',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 34,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Consulta, resumen SOAP y PDF en un flujo medico simple.',
+                                style: TextStyle(
+                                  color: Color(0xFFDFF7F4),
+                                  height: 1.35,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              const SizedBox(height: 20),
+                              const Row(
+                                children: [
+                                  Expanded(
+                                    child: LoginSignal(
+                                      icon: Icons.mic_none,
+                                      text: 'Audio',
+                                    ),
+                                  ),
+                                  SizedBox(width: 8),
+                                  Expanded(
+                                    child: LoginSignal(
+                                      icon: Icons.auto_awesome_outlined,
+                                      text: 'SOAP',
+                                    ),
+                                  ),
+                                  SizedBox(width: 8),
+                                  Expanded(
+                                    child: LoginSignal(
+                                      icon: Icons.picture_as_pdf_outlined,
+                                      text: 'PDF',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        const Text(
+                          'Acceso medico',
                           style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 31,
+                            fontSize: 27,
                             fontWeight: FontWeight.w900,
                           ),
                         ),
-                        SizedBox(height: 6),
+                        const SizedBox(height: 8),
                         Text(
-                          'Graba la consulta y genera el resumen clinico.',
-                          style: TextStyle(color: Color(0xFFE5FFFB)),
+                          'Ingresa con tu correo y contrasena para continuar con pacientes, consultas y reportes.',
+                          style: TextStyle(
+                            color: Colors.grey.shade700,
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 22),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFFE0E7E5)),
+                          ),
+                          child: Form(
+                            key: formKey,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                TextFormField(
+                                  controller: emailController,
+                                  keyboardType: TextInputType.emailAddress,
+                                  textInputAction: TextInputAction.next,
+                                  autofillHints: const [AutofillHints.email],
+                                  decoration: const InputDecoration(
+                                    labelText: 'Correo medico',
+                                    prefixIcon: Icon(Icons.mail_outline),
+                                  ),
+                                  validator: (value) {
+                                    final email = value?.trim() ?? '';
+                                    if (email.isEmpty) {
+                                      return 'Ingresa tu correo medico.';
+                                    }
+                                    if (!email.contains('@')) {
+                                      return 'Usa un correo valido.';
+                                    }
+                                    return null;
+                                  },
+                                ),
+                                const SizedBox(height: 14),
+                                TextFormField(
+                                  controller: passwordController,
+                                  obscureText: !passwordVisible,
+                                  textInputAction: TextInputAction.done,
+                                  autofillHints: const [AutofillHints.password],
+                                  onFieldSubmitted: (_) => _login(),
+                                  decoration: InputDecoration(
+                                    labelText: 'Contrasena',
+                                    prefixIcon: const Icon(Icons.lock_outline),
+                                    suffixIcon: IconButton(
+                                      tooltip: passwordVisible
+                                          ? 'Ocultar contrasena'
+                                          : 'Mostrar contrasena',
+                                      onPressed: () {
+                                        setState(() {
+                                          passwordVisible = !passwordVisible;
+                                        });
+                                      },
+                                      icon: Icon(
+                                        passwordVisible
+                                            ? Icons.visibility_off_outlined
+                                            : Icons.visibility_outlined,
+                                      ),
+                                    ),
+                                  ),
+                                  validator: (value) {
+                                    if ((value ?? '').isEmpty) {
+                                      return 'Ingresa tu contrasena.';
+                                    }
+                                    return null;
+                                  },
+                                ),
+                                const SizedBox(height: 18),
+                                Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.verified_user_outlined,
+                                      color: primary,
+                                      size: 19,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        'Conexion directa al API de Sanare.',
+                                        style: TextStyle(
+                                          color: Colors.grey.shade700,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 18),
+                                SizedBox(
+                                  width: double.infinity,
+                                  height: 52,
+                                  child: FilledButton.icon(
+                                    onPressed: isLoading ? null : _login,
+                                    icon: isLoading
+                                        ? const SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(Icons.login),
+                                    label: Text(
+                                      isLoading ? 'Verificando...' : 'Ingresar',
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                SizedBox(
+                                  width: double.infinity,
+                                  height: 48,
+                                  child: OutlinedButton.icon(
+                                    onPressed: isLoading ? null : _openDemo,
+                                    icon: const Icon(
+                                      Icons.explore_outlined,
+                                      size: 20,
+                                    ),
+                                    label: const Text('Continuar en modo demo'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const Spacer(),
+                        const SizedBox(height: 18),
+                        Center(
+                          child: Text(
+                            'Sanare IA para equipos clinicos',
+                            style: TextStyle(
+                              color: Colors.grey.shade600,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12,
+                            ),
+                          ),
                         ),
                       ],
                     ),
                   ),
-                  const SizedBox(height: 28),
-                  const Text(
-                    'Entrar a la clinica',
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Prototipo conectado solo a medico, paciente y consulta.',
-                    style: TextStyle(color: Colors.grey.shade700),
-                  ),
-                  const SizedBox(height: 24),
-                  TextField(
-                    controller: tenantController,
-                    decoration: const InputDecoration(
-                      labelText: 'Dominio de la clinica',
-                      prefixIcon: Icon(Icons.domain_outlined),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  TextField(
-                    controller: emailController,
-                    keyboardType: TextInputType.emailAddress,
-                    decoration: const InputDecoration(
-                      labelText: 'Correo medico',
-                      prefixIcon: Icon(Icons.mail_outline),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  TextField(
-                    controller: passwordController,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Contrasena',
-                      prefixIcon: Icon(Icons.lock_outline),
-                    ),
-                  ),
-                  const SizedBox(height: 22),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 52,
-                    child: FilledButton.icon(
-                      onPressed: isLoading ? null : _login,
-                      icon: isLoading
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.login),
-                      label: Text(isLoading ? 'Conectando...' : 'Ingresar'),
-                    ),
-                  ),
-                ],
+                ),
               ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class SanareMark extends StatelessWidget {
+  const SanareMark({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    const heights = [18.0, 30.0, 44.0, 30.0, 18.0];
+
+    return Container(
+      width: 54,
+      height: 54,
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .12),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withValues(alpha: .18)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: heights
+            .map(
+              (height) => Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: Container(
+                  width: 4,
+                  height: height,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
+}
+
+class LoginSignal extends StatelessWidget {
+  const LoginSignal({super.key, required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .10),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withValues(alpha: .14)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: const Color(0xFF7DDDD1), size: 20),
+          const SizedBox(height: 5),
+          Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
             ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -400,10 +656,133 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
   }
 }
 
-class PatientsScreen extends StatelessWidget {
+class PatientsScreen extends StatefulWidget {
   const PatientsScreen({super.key, required this.apiClient});
 
   final ApiClient apiClient;
+
+  @override
+  State<PatientsScreen> createState() => _PatientsScreenState();
+}
+
+class _PatientsScreenState extends State<PatientsScreen> {
+  late Future<List<Patient>> patientsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    patientsFuture = _loadPatients();
+  }
+
+  Future<List<Patient>> _loadPatients() {
+    return widget.apiClient.isAuthenticated
+        ? widget.apiClient.fetchPatients()
+        : Future.value(mockPatients);
+  }
+
+  void _refreshPatients() {
+    setState(() {
+      patientsFuture = _loadPatients();
+    });
+  }
+
+  Future<void> _showCreatePatientDialog() async {
+    if (!widget.apiClient.isAuthenticated) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Inicia sesion para crear pacientes.')),
+      );
+      return;
+    }
+
+    final firstNameController = TextEditingController();
+    final lastNameController = TextEditingController();
+    final dniController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    final values = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Nuevo paciente'),
+          content: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: firstNameController,
+                  decoration: const InputDecoration(labelText: 'Nombres'),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Requerido'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: lastNameController,
+                  decoration: const InputDecoration(labelText: 'Apellidos'),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Requerido'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: dniController,
+                  decoration: const InputDecoration(labelText: 'DNI'),
+                  keyboardType: TextInputType.number,
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Requerido'
+                      : null,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () {
+                if (!formKey.currentState!.validate()) return;
+
+                Navigator.of(context).pop({
+                  'first_name': firstNameController.text.trim(),
+                  'last_name': lastNameController.text.trim(),
+                  'dni': dniController.text.trim(),
+                });
+              },
+              child: const Text('Guardar'),
+            ),
+          ],
+        );
+      },
+    );
+
+    firstNameController.dispose();
+    lastNameController.dispose();
+    dniController.dispose();
+
+    if (values == null) return;
+
+    try {
+      await widget.apiClient.createPatient(
+        firstName: values['first_name']!,
+        lastName: values['last_name']!,
+        dni: values['dni']!,
+      );
+      _refreshPatients();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Paciente creado correctamente.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo crear el paciente: $error')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -413,7 +792,7 @@ class PatientsScreen extends StatelessWidget {
       actions: [
         IconButton(
           tooltip: 'Nuevo paciente',
-          onPressed: () {},
+          onPressed: _showCreatePatientDialog,
           icon: const Icon(Icons.person_add_alt_outlined),
         ),
       ],
@@ -423,9 +802,7 @@ class PatientsScreen extends StatelessWidget {
           const SearchBox(label: 'Buscar por nombre, DNI o telefono'),
           const SizedBox(height: 16),
           FutureBuilder<List<Patient>>(
-            future: apiClient.isAuthenticated
-                ? apiClient.fetchPatients()
-                : Future.value(mockPatients),
+            future: patientsFuture,
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Center(
@@ -436,7 +813,19 @@ class PatientsScreen extends StatelessWidget {
                 );
               }
 
-              final patients = snapshot.data ?? mockPatients;
+              if (snapshot.hasError) {
+                return ErrorCard(message: snapshot.error.toString());
+              }
+
+              final patients = snapshot.data ?? const <Patient>[];
+              if (patients.isEmpty) {
+                return const EmptyState(
+                  icon: Icons.people_outline,
+                  title: 'Sin pacientes',
+                  body: 'Crea el primer paciente con nombres, apellidos y DNI.',
+                );
+              }
+
               return Column(
                 children: patients
                     .map(
@@ -491,7 +880,19 @@ class HistoryScreen extends StatelessWidget {
                 );
               }
 
+              if (snapshot.hasError) {
+                return ErrorCard(message: snapshot.error.toString());
+              }
+
               final consultations = snapshot.data ?? mockConsultations;
+              if (consultations.isEmpty) {
+                return const EmptyState(
+                  icon: Icons.picture_as_pdf_outlined,
+                  title: 'Sin consultas',
+                  body: 'Cuando guardes una consulta SOAP aparecera aqui.',
+                );
+              }
+
               return Column(
                 children: consultations
                     .map(
@@ -1069,6 +1470,69 @@ class SearchBox extends StatelessWidget {
   }
 }
 
+class EmptyState extends StatelessWidget {
+  const EmptyState({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.body,
+  });
+
+  final IconData icon;
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(22),
+        child: Column(
+          children: [
+            Icon(icon, size: 40, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              body,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade700),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ErrorCard extends StatelessWidget {
+  const ErrorCard({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          children: [
+            Icon(
+              Icons.error_outline,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text(message)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class PatientTile extends StatelessWidget {
   const PatientTile({super.key, required this.patient, required this.onTap});
 
@@ -1338,9 +1802,17 @@ class Patient {
   final String bloodType;
 
   factory Patient.fromJson(Map<String, dynamic> json) {
+    final firstName = json['first_name']?.toString() ?? '';
+    final lastName = json['last_name']?.toString() ?? '';
+    final fullName = json['full_name']?.toString();
+    final legacyName = json['nombre']?.toString();
+    final name = fullName != null && fullName.trim().isNotEmpty
+        ? fullName
+        : '$firstName $lastName'.trim();
+
     return Patient(
       id: (json['id'] as num?)?.toInt() ?? 0,
-      name: json['nombre']?.toString() ?? 'Paciente sin nombre',
+      name: name.isNotEmpty ? name : legacyName ?? 'Paciente sin nombre',
       dni: json['dni']?.toString() ?? 'Sin DNI',
       phone: json['telefono']?.toString() ?? 'Sin telefono',
       age: _ageFromDate(json['fecha_nacimiento']?.toString()),
@@ -1349,7 +1821,13 @@ class Patient {
   }
 
   String get initials {
-    final parts = name.split(' ');
+    final parts = name
+        .split(' ')
+        .where((part) => part.trim().isNotEmpty)
+        .toList(growable: false);
+
+    if (parts.isEmpty) return 'P';
+
     return '${parts.first[0]}${parts.length > 1 ? parts.last[0] : ''}';
   }
 }
@@ -1405,18 +1883,31 @@ class ConsultationSummary {
   final String? pdfUrl;
 
   factory ConsultationSummary.fromJson(Map<String, dynamic> json) {
-    final patient = json['paciente'] is Map<String, dynamic>
+    final patient = json['patient'] is Map<String, dynamic>
+        ? json['patient'] as Map<String, dynamic>
+        : json['paciente'] is Map<String, dynamic>
         ? json['paciente'] as Map<String, dynamic>
         : <String, dynamic>{};
-    final diagnosis = json['diagnostico']?.toString();
+    final parsedPatient = Patient.fromJson(patient);
+    final assessment =
+        json['assessment']?.toString() ?? json['diagnostico']?.toString();
+    final reason = json['reason']?.toString();
+    final title = reason != null && reason.trim().isNotEmpty
+        ? reason
+        : assessment;
 
     return ConsultationSummary(
-      patient: patient['nombre']?.toString() ?? 'Paciente',
-      title: diagnosis == null || diagnosis.isEmpty
+      patient: parsedPatient.name == 'Paciente sin nombre'
+          ? 'Paciente'
+          : parsedPatient.name,
+      title: title == null || title.isEmpty
           ? 'Consulta generada por IA'
-          : diagnosis,
-      date: json['created_at']?.toString() ?? 'Sin fecha',
-      status: json['resumen_ia'] == null ? 'Guardado' : 'PDF listo',
+          : title,
+      date:
+          json['consulted_at']?.toString() ??
+          json['created_at']?.toString() ??
+          'Sin fecha',
+      status: json['resumen_ia'] == null ? 'SOAP guardado' : 'PDF listo',
       pdfUrl: json['pdf_url']?.toString(),
     );
   }
@@ -1448,31 +1939,35 @@ class ApiSession {
     required this.token,
     required this.doctorName,
     required this.doctorEmail,
+    required this.roles,
   });
 
   final String token;
   final String doctorName;
   final String doctorEmail;
+  final List<String> roles;
+
+  bool get isAdmin => roles.contains('admin');
 }
 
 class ApiClient {
-  ApiClient({required this.tenantDomain});
+  ApiClient();
 
   static const String baseUrl = String.fromEnvironment(
     'SANARE_API_URL',
-    defaultValue: 'http://127.0.0.1:8000/api/v1/mobile',
+    defaultValue: 'http://127.0.0.1:8000/api',
   );
 
-  final String tenantDomain;
   String? _token;
+  bool _isAdmin = false;
 
   bool get isAuthenticated => _token != null;
+  bool get isAdmin => _isAdmin;
 
   Map<String, String> get _headers {
     return {
       'Accept': 'application/json',
       'Content-Type': 'application/json',
-      if (tenantDomain.isNotEmpty) 'X-Tenant-Domain': tenantDomain,
       if (_token != null) 'Authorization': 'Bearer $_token',
     };
   }
@@ -1481,35 +1976,43 @@ class ApiClient {
     required String email,
     required String password,
   }) async {
-    final data = await _post('/auth/login', {
+    final data = await _post('/doctors/login', {
       'email': email,
       'password': password,
       'device_name': 'sanare_mobile',
     });
 
-    _token = data['access_token']?.toString();
+    _token = data['token']?.toString() ?? data['access_token']?.toString();
     if (_token == null || _token!.isEmpty) {
       throw Exception('Respuesta sin token.');
     }
 
-    final user = data['user'] is Map<String, dynamic>
+    final user = data['doctor'] is Map<String, dynamic>
+        ? data['doctor'] as Map<String, dynamic>
+        : data['user'] is Map<String, dynamic>
         ? data['user'] as Map<String, dynamic>
         : <String, dynamic>{};
     final medico = data['medico'] is Map<String, dynamic>
         ? data['medico'] as Map<String, dynamic>
         : <String, dynamic>{};
+    final roles = data['roles'] is List
+        ? (data['roles'] as List).map((role) => role.toString()).toList()
+        : <String>[];
+    _isAdmin = roles.contains('admin');
 
     return ApiSession(
       token: _token!,
       doctorName:
           medico['nombre']?.toString() ?? user['name']?.toString() ?? 'Medico',
       doctorEmail: user['email']?.toString() ?? email,
+      roles: roles,
     );
   }
 
   Future<List<Patient>> fetchPatients() async {
-    final data = await _get('/pacientes');
-    final items = data['data'] as List<dynamic>? ?? [];
+    final data = await _get(_isAdmin ? '/admin/patients' : '/patients');
+    final items = _itemsFrom(data, 'patients');
+
     return items
         .whereType<Map<String, dynamic>>()
         .map(Patient.fromJson)
@@ -1517,12 +2020,34 @@ class ApiClient {
   }
 
   Future<List<ConsultationSummary>> fetchConsultations() async {
-    final data = await _get('/consultas');
-    final items = data['data'] as List<dynamic>? ?? [];
+    final data = await _get(
+      _isAdmin ? '/admin/consultations' : '/consultations',
+    );
+    final items = _itemsFrom(data, 'consultations');
+
     return items
         .whereType<Map<String, dynamic>>()
         .map(ConsultationSummary.fromJson)
         .toList();
+  }
+
+  Future<Patient> createPatient({
+    required String firstName,
+    required String lastName,
+    required String dni,
+  }) async {
+    final data = await _post('/patients', {
+      'first_name': firstName,
+      'last_name': lastName,
+      'dni': dni,
+    });
+
+    final patient = data['patient'];
+    if (patient is! Map<String, dynamic>) {
+      throw Exception('Respuesta sin paciente.');
+    }
+
+    return Patient.fromJson(patient);
   }
 
   Future<void> createConsultation({
@@ -1533,20 +2058,27 @@ class ApiClient {
     required String transcripcion,
     required String resumenIa,
   }) async {
-    await _post('/consultas', {
-      'paciente_id': pacienteId,
-      'diagnostico': diagnostico,
-      'tratamiento': tratamiento,
-      'observaciones': observaciones,
-      'transcripcion': transcripcion,
-      'resumen_ia': resumenIa,
-      'resumen_ia_estructurado': {
-        'motivo': 'Congestion nasal, estornudos y picazon ocular.',
-        'diagnostico': diagnostico,
-        'tratamiento': tratamiento,
-        'observaciones': observaciones,
-      },
+    await _post('/consultations', {
+      'patient_id': pacienteId,
+      'reason': 'Consulta IA',
+      'subjective': transcripcion,
+      'objective': observaciones,
+      'assessment': diagnostico,
+      'plan': tratamiento,
+      'vital_signs': {'ai_summary': resumenIa},
     });
+  }
+
+  List<dynamic> _itemsFrom(Map<String, dynamic> data, String key) {
+    final keyed = data[key];
+
+    if (keyed is List<dynamic>) return keyed;
+    if (keyed is Map<String, dynamic> && keyed['data'] is List<dynamic>) {
+      return keyed['data'] as List<dynamic>;
+    }
+    if (data['data'] is List<dynamic>) return data['data'] as List<dynamic>;
+
+    return const [];
   }
 
   Future<Map<String, dynamic>> _get(String path) async {
