@@ -33,6 +33,10 @@ dependencies:
 
   http: ^1.5.0
   cupertino_icons: ^1.0.8
+  record: ^7.1.0
+  path_provider: ^2.1.6
+  pdf: ^3.13.0
+  open_filex: ^4.7.0
 
 dev_dependencies:
   flutter_test:

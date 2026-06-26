@@ -1,7 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:open_filex/open_filex.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:record/record.dart';
+
+import 'platform_files.dart';
 
 void main() {
   runApp(const SanareMobileApp());
@@ -126,6 +133,12 @@ class _LoginScreenState extends State<LoginScreen> {
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => MobileShell(apiClient: ApiClient())),
     );
+  }
+
+  void _openRegister() {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const DoctorRegisterScreen()));
   }
 
   @override
@@ -372,6 +385,19 @@ class _LoginScreenState extends State<LoginScreen> {
                                     label: const Text('Continuar en modo demo'),
                                   ),
                                 ),
+                                const SizedBox(height: 10),
+                                SizedBox(
+                                  width: double.infinity,
+                                  height: 48,
+                                  child: TextButton.icon(
+                                    onPressed: isLoading ? null : _openRegister,
+                                    icon: const Icon(
+                                      Icons.person_add_alt_outlined,
+                                      size: 20,
+                                    ),
+                                    label: const Text('Crear cuenta medica'),
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -395,6 +421,240 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+class DoctorRegisterScreen extends StatefulWidget {
+  const DoctorRegisterScreen({super.key});
+
+  @override
+  State<DoctorRegisterScreen> createState() => _DoctorRegisterScreenState();
+}
+
+class _DoctorRegisterScreenState extends State<DoctorRegisterScreen> {
+  final formKey = GlobalKey<FormState>();
+  final nameController = TextEditingController();
+  final emailController = TextEditingController();
+  final passwordController = TextEditingController();
+  final passwordConfirmationController = TextEditingController();
+  bool isLoading = false;
+  bool passwordVisible = false;
+
+  @override
+  void dispose() {
+    nameController.dispose();
+    emailController.dispose();
+    passwordController.dispose();
+    passwordConfirmationController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _register() async {
+    if (!formKey.currentState!.validate()) return;
+
+    final apiClient = ApiClient();
+
+    setState(() => isLoading = true);
+    try {
+      final session = await apiClient.registerDoctor(
+        name: nameController.text.trim(),
+        email: emailController.text.trim(),
+        password: passwordController.text,
+        passwordConfirmation: passwordConfirmationController.text,
+      );
+
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(
+          builder: (_) => MobileShell(apiClient: apiClient, session: session),
+        ),
+        (_) => false,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo crear la cuenta: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Nuevo doctor')),
+      body: SafeArea(
+        top: false,
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(22, 12, 22, 24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Crear cuenta medica',
+                    style: TextStyle(fontSize: 27, fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Cada doctor tendra pacientes, consultas y PDFs separados por su usuario.',
+                    style: TextStyle(color: Colors.grey.shade700, height: 1.35),
+                  ),
+                  const SizedBox(height: 22),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFE0E7E5)),
+                    ),
+                    child: Form(
+                      key: formKey,
+                      child: Column(
+                        children: [
+                          TextFormField(
+                            controller: nameController,
+                            textInputAction: TextInputAction.next,
+                            autofillHints: const [AutofillHints.name],
+                            decoration: const InputDecoration(
+                              labelText: 'Nombre del doctor',
+                              prefixIcon: Icon(Icons.badge_outlined),
+                            ),
+                            validator: (value) {
+                              if ((value ?? '').trim().isEmpty) {
+                                return 'Ingresa el nombre.';
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 14),
+                          TextFormField(
+                            controller: emailController,
+                            keyboardType: TextInputType.emailAddress,
+                            textInputAction: TextInputAction.next,
+                            autofillHints: const [AutofillHints.email],
+                            decoration: const InputDecoration(
+                              labelText: 'Correo medico',
+                              prefixIcon: Icon(Icons.mail_outline),
+                            ),
+                            validator: (value) {
+                              final email = value?.trim() ?? '';
+                              if (email.isEmpty) return 'Ingresa el correo.';
+                              if (!email.contains('@')) {
+                                return 'Usa un correo valido.';
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 14),
+                          TextFormField(
+                            controller: passwordController,
+                            obscureText: !passwordVisible,
+                            textInputAction: TextInputAction.next,
+                            autofillHints: const [AutofillHints.newPassword],
+                            decoration: InputDecoration(
+                              labelText: 'Contrasena',
+                              prefixIcon: const Icon(Icons.lock_outline),
+                              suffixIcon: IconButton(
+                                tooltip: passwordVisible
+                                    ? 'Ocultar contrasena'
+                                    : 'Mostrar contrasena',
+                                onPressed: () {
+                                  setState(() {
+                                    passwordVisible = !passwordVisible;
+                                  });
+                                },
+                                icon: Icon(
+                                  passwordVisible
+                                      ? Icons.visibility_off_outlined
+                                      : Icons.visibility_outlined,
+                                ),
+                              ),
+                            ),
+                            validator: (value) {
+                              final password = value ?? '';
+                              if (password.length < 8) {
+                                return 'Minimo 8 caracteres.';
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 14),
+                          TextFormField(
+                            controller: passwordConfirmationController,
+                            obscureText: !passwordVisible,
+                            textInputAction: TextInputAction.done,
+                            autofillHints: const [AutofillHints.newPassword],
+                            onFieldSubmitted: (_) => _register(),
+                            decoration: const InputDecoration(
+                              labelText: 'Confirmar contrasena',
+                              prefixIcon: Icon(Icons.lock_reset_outlined),
+                            ),
+                            validator: (value) {
+                              if ((value ?? '').isEmpty) {
+                                return 'Confirma la contrasena.';
+                              }
+                              if (value != passwordController.text) {
+                                return 'Las contrasenas no coinciden.';
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 18),
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.lock_person_outlined,
+                                color: Theme.of(context).colorScheme.primary,
+                                size: 19,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'La informacion clinica queda vinculada a esta cuenta.',
+                                  style: TextStyle(
+                                    color: Colors.grey.shade700,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 18),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 52,
+                            child: FilledButton.icon(
+                              onPressed: isLoading ? null : _register,
+                              icon: isLoading
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.person_add_alt_outlined),
+                              label: Text(
+                                isLoading ? 'Creando...' : 'Crear cuenta',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -527,6 +787,36 @@ class _MobileShellState extends State<MobileShell> {
   }
 }
 
+class SoapNote {
+  const SoapNote({
+    required this.reason,
+    required this.subjective,
+    required this.objective,
+    required this.assessment,
+    required this.plan,
+    required this.aiSummary,
+  });
+
+  final String reason;
+  final String subjective;
+  final String objective;
+  final String assessment;
+  final String plan;
+  final String aiSummary;
+}
+
+const demoSoapNote = SoapNote(
+  reason: 'Consulta IA',
+  subjective:
+      'Paciente refiere congestion nasal, estornudos frecuentes y picazon ocular desde hace tres dias.',
+  objective: 'Evitar polvo y registrar evolucion de sintomas.',
+  assessment:
+      'Cuadro compatible con rinitis alergica sin datos de alarma respiratoria.',
+  plan: 'Antihistaminico oral por 7 dias, lavado nasal y control.',
+  aiSummary:
+      'Paciente con sintomas compatibles con rinitis alergica. Se indica manejo sintomatico y control si no hay mejoria.',
+);
+
 class AiConsultationScreen extends StatefulWidget {
   const AiConsultationScreen({super.key, required this.apiClient});
 
@@ -537,10 +827,203 @@ class AiConsultationScreen extends StatefulWidget {
 }
 
 class _AiConsultationScreenState extends State<AiConsultationScreen> {
+  late final AudioRecorder audioRecorder;
+  Timer? recordingTimer;
+  DateTime? recordingStartedAt;
+  DateTime? recordingSavedAt;
   Patient selectedPatient = mockPatients.first;
   bool isRecording = false;
   bool hasGeneratedSummary = true;
   bool isSaving = false;
+  bool isGeneratingPdf = false;
+  Duration recordingDuration = Duration.zero;
+  Duration? pdfGenerationDuration;
+  String? recordingPath;
+  String? generatedPdfPath;
+
+  @override
+  void initState() {
+    super.initState();
+    audioRecorder = AudioRecorder();
+  }
+
+  @override
+  void dispose() {
+    recordingTimer?.cancel();
+    unawaited(audioRecorder.dispose());
+    super.dispose();
+  }
+
+  Future<void> _startRecording() async {
+    try {
+      final hasPermission = await audioRecorder.hasPermission();
+      if (!hasPermission) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Permite el microfono para grabar la consulta.'),
+          ),
+        );
+        return;
+      }
+
+      final startedAt = DateTime.now();
+      final path = await createRecordingPath(
+        'sanare_audio_${_timestampForFile(startedAt)}.m4a',
+      );
+
+      await audioRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 96000,
+          sampleRate: 44100,
+          numChannels: 1,
+        ),
+        path: path,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        isRecording = true;
+        hasGeneratedSummary = false;
+        recordingStartedAt = startedAt;
+        recordingSavedAt = null;
+        recordingDuration = Duration.zero;
+        recordingPath = null;
+        generatedPdfPath = null;
+        pdfGenerationDuration = null;
+      });
+      _startRecordingTimer();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo iniciar la grabacion: $error')),
+      );
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    try {
+      final stoppedPath = await audioRecorder.stop();
+      recordingTimer?.cancel();
+
+      final duration = recordingStartedAt == null
+          ? recordingDuration
+          : DateTime.now().difference(recordingStartedAt!);
+
+      if (!mounted) return;
+      setState(() {
+        isRecording = false;
+        recordingDuration = duration;
+        recordingPath = stoppedPath == null || stoppedPath.isEmpty
+            ? null
+            : stoppedPath;
+        recordingSavedAt = DateTime.now();
+        hasGeneratedSummary = true;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Grabacion guardada localmente (${_formatDuration(duration)}).',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => isRecording = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo detener la grabacion: $error')),
+      );
+    }
+  }
+
+  Future<void> _toggleRecording() {
+    return isRecording ? _stopRecording() : _startRecording();
+  }
+
+  void _startRecordingTimer() {
+    recordingTimer?.cancel();
+    recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final startedAt = recordingStartedAt;
+      if (!mounted || startedAt == null) return;
+
+      setState(() {
+        recordingDuration = DateTime.now().difference(startedAt);
+      });
+    });
+  }
+
+  Future<void> _newConsultation() async {
+    if (isRecording) {
+      await _stopRecording();
+    }
+
+    if (!mounted) return;
+    setState(() {
+      hasGeneratedSummary = false;
+      recordingDuration = Duration.zero;
+      recordingPath = null;
+      recordingSavedAt = null;
+      generatedPdfPath = null;
+      pdfGenerationDuration = null;
+    });
+  }
+
+  Future<void> _generatePdf() async {
+    if (isRecording) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Deten la grabacion antes de generar el PDF.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => isGeneratingPdf = true);
+    final stopwatch = Stopwatch()..start();
+
+    try {
+      final bytes = await SoapPdfGenerator.generate(
+        patient: selectedPatient,
+        soapNote: demoSoapNote,
+        audioDuration: recordingDuration,
+        audioPath: recordingPath,
+        recordedAt: recordingSavedAt ?? DateTime.now(),
+      );
+      final fileName =
+          'sanare_soap_${_safeFilePart(selectedPatient.name)}_${_timestampForFile(DateTime.now())}.pdf';
+      final path = await savePdfBytes(fileName, bytes);
+
+      stopwatch.stop();
+      final generationDuration = stopwatch.elapsed;
+
+      if (!mounted) return;
+      setState(() {
+        generatedPdfPath = path;
+        pdfGenerationDuration = generationDuration;
+      });
+
+      if (path.isNotEmpty) {
+        unawaited(OpenFilex.open(path));
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'PDF SOAP generado en ${_formatGenerationTime(generationDuration)}.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo generar el PDF: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => isGeneratingPdf = false);
+    }
+  }
 
   Future<void> _saveConsultation() async {
     if (!widget.apiClient.isAuthenticated) {
@@ -556,14 +1039,11 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
     try {
       await widget.apiClient.createConsultation(
         pacienteId: selectedPatient.id,
-        diagnostico:
-            'Cuadro compatible con rinitis alergica sin datos de alarma respiratoria.',
-        tratamiento: 'Antihistaminico oral por 7 dias, lavado nasal y control.',
-        observaciones: 'Evitar polvo y registrar evolucion de sintomas.',
-        transcripcion:
-            'Paciente refiere congestion nasal, estornudos frecuentes y picazon ocular desde hace tres dias.',
-        resumenIa:
-            'Paciente con sintomas compatibles con rinitis alergica. Se indica manejo sintomatico y control si no hay mejoria.',
+        soapNote: demoSoapNote,
+        audioDuration: recordingPath == null ? null : recordingDuration,
+        audioPath: recordingPath,
+        pdfPath: generatedPdfPath,
+        pdfGenerationDuration: pdfGenerationDuration,
       );
 
       if (!mounted) return;
@@ -588,12 +1068,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
       actions: [
         IconButton(
           tooltip: 'Nueva consulta',
-          onPressed: () {
-            setState(() {
-              isRecording = false;
-              hasGeneratedSummary = false;
-            });
-          },
+          onPressed: _newConsultation,
           icon: const Icon(Icons.add_circle_outline),
         ),
       ],
@@ -610,19 +1085,25 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
           const SizedBox(height: 16),
           RecordingPanel(
             isRecording: isRecording,
-            onToggle: () {
-              setState(() {
-                isRecording = !isRecording;
-                if (!isRecording) {
-                  hasGeneratedSummary = true;
-                }
-              });
-            },
+            duration: recordingDuration,
+            audioPath: recordingPath,
+            onToggle: _toggleRecording,
           ),
           const SizedBox(height: 16),
-          const WorkflowStatus(),
+          WorkflowStatus(
+            hasAudio: recordingPath != null,
+            hasPdf: generatedPdfPath != null,
+          ),
           const SizedBox(height: 16),
-          if (hasGeneratedSummary) const AiSummaryCard(),
+          if (hasGeneratedSummary) const AiSummaryCard(soapNote: demoSoapNote),
+          if (hasGeneratedSummary) const SizedBox(height: 16),
+          if (hasGeneratedSummary)
+            ConsultationOutputStatus(
+              audioPath: recordingPath,
+              audioDuration: recordingDuration,
+              pdfPath: generatedPdfPath,
+              pdfGenerationDuration: pdfGenerationDuration,
+            ),
           if (hasGeneratedSummary) const SizedBox(height: 16),
           if (hasGeneratedSummary)
             Row(
@@ -643,9 +1124,17 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () {},
-                    icon: const Icon(Icons.picture_as_pdf_outlined),
-                    label: const Text('PDF'),
+                    onPressed: isGeneratingPdf ? null : _generatePdf,
+                    icon: isGeneratingPdf
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.picture_as_pdf_outlined),
+                    label: Text(
+                      isGeneratingPdf ? 'Generando...' : 'Generar PDF',
+                    ),
                   ),
                 ),
               ],
@@ -1134,10 +1623,14 @@ class RecordingPanel extends StatelessWidget {
   const RecordingPanel({
     super.key,
     required this.isRecording,
+    required this.duration,
+    required this.audioPath,
     required this.onToggle,
   });
 
   final bool isRecording;
+  final Duration duration;
+  final String? audioPath;
   final VoidCallback onToggle;
 
   @override
@@ -1146,6 +1639,7 @@ class RecordingPanel extends StatelessWidget {
         ? const Color(0xFFD94A38)
         : Theme.of(context).colorScheme.primary;
     final label = isRecording ? 'Detener grabacion' : 'Iniciar grabacion';
+    final hasAudio = audioPath != null;
 
     return Card(
       child: Padding(
@@ -1163,17 +1657,38 @@ class RecordingPanel extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             Text(
-              isRecording ? '00:03:24' : 'Listo para grabar',
+              isRecording || hasAudio
+                  ? _formatDuration(duration)
+                  : 'Listo para grabar',
               style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900),
             ),
             const SizedBox(height: 6),
             Text(
               isRecording
                   ? 'Escuchando la consulta medico-paciente'
-                  : 'El audio se enviara para transcripcion y resumen IA',
+                  : hasAudio
+                  ? 'Audio guardado localmente en el dispositivo'
+                  : 'El audio se usara para construir el resumen SOAP',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey.shade700),
             ),
+            if (hasAudio) const SizedBox(height: 12),
+            if (hasAudio)
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  InfoPill(
+                    icon: Icons.timer_outlined,
+                    text: _formatDuration(duration),
+                  ),
+                  const InfoPill(
+                    icon: Icons.save_outlined,
+                    text: 'Grabacion local',
+                  ),
+                ],
+              ),
             const SizedBox(height: 18),
             SizedBox(
               width: double.infinity,
@@ -1193,40 +1708,51 @@ class RecordingPanel extends StatelessWidget {
 }
 
 class WorkflowStatus extends StatelessWidget {
-  const WorkflowStatus({super.key});
+  const WorkflowStatus({
+    super.key,
+    required this.hasAudio,
+    required this.hasPdf,
+  });
+
+  final bool hasAudio;
+  final bool hasPdf;
 
   @override
   Widget build(BuildContext context) {
-    return const Card(
+    return Card(
       child: Padding(
-        padding: EdgeInsets.all(16),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            const Text(
               'Flujo del prototipo',
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
             ),
-            SizedBox(height: 14),
+            const SizedBox(height: 14),
             FlowStep(
               icon: Icons.mic_none,
               title: '1. Grabar audio',
-              body: 'Consulta capturada desde el telefono',
+              body: hasAudio
+                  ? 'Grabacion disponible en almacenamiento local'
+                  : 'Consulta capturada desde el telefono',
             ),
-            FlowStep(
+            const FlowStep(
               icon: Icons.text_snippet_outlined,
               title: '2. Transcribir',
-              body: 'Audio convertido a texto clinico',
+              body: 'Pendiente de conectar a un servicio de transcripcion',
             ),
-            FlowStep(
+            const FlowStep(
               icon: Icons.auto_awesome_outlined,
               title: '3. Resumir con IA',
-              body: 'Diagnostico, tratamiento y observaciones',
+              body: 'SOAP listo con datos demo editables despues',
             ),
             FlowStep(
               icon: Icons.picture_as_pdf_outlined,
               title: '4. Generar PDF',
-              body: 'Documento final para expediente',
+              body: hasPdf
+                  ? 'PDF SOAP generado y guardado localmente'
+                  : 'Documento final para expediente',
             ),
           ],
         ),
@@ -1276,7 +1802,9 @@ class FlowStep extends StatelessWidget {
 }
 
 class AiSummaryCard extends StatelessWidget {
-  const AiSummaryCard({super.key});
+  const AiSummaryCard({super.key, required this.soapNote});
+
+  final SoapNote soapNote;
 
   @override
   Widget build(BuildContext context) {
@@ -1303,26 +1831,80 @@ class AiSummaryCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 14),
-            const SummaryBlock(
-              title: 'Motivo de consulta',
-              body:
-                  'Paciente refiere congestion nasal, estornudos frecuentes y picazon ocular desde hace tres dias.',
+            SummaryBlock(title: 'S - Subjetivo', body: soapNote.subjective),
+            SummaryBlock(title: 'O - Objetivo', body: soapNote.objective),
+            SummaryBlock(title: 'A - Evaluacion', body: soapNote.assessment),
+            SummaryBlock(title: 'P - Plan', body: soapNote.plan),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ConsultationOutputStatus extends StatelessWidget {
+  const ConsultationOutputStatus({
+    super.key,
+    required this.audioPath,
+    required this.audioDuration,
+    required this.pdfPath,
+    required this.pdfGenerationDuration,
+  });
+
+  final String? audioPath;
+  final Duration audioDuration;
+  final String? pdfPath;
+  final Duration? pdfGenerationDuration;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Archivos de la consulta',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
             ),
-            const SummaryBlock(
-              title: 'Impresion diagnostica',
-              body:
-                  'Cuadro compatible con rinitis alergica sin datos de alarma respiratoria.',
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                InfoPill(
+                  icon: audioPath == null
+                      ? Icons.mic_none
+                      : Icons.check_circle_outline,
+                  text: audioPath == null
+                      ? 'Audio pendiente'
+                      : 'Audio ${_formatDuration(audioDuration)}',
+                ),
+                InfoPill(
+                  icon: pdfPath == null
+                      ? Icons.picture_as_pdf_outlined
+                      : Icons.check_circle_outline,
+                  text: pdfGenerationDuration == null
+                      ? 'PDF pendiente'
+                      : 'PDF ${_formatGenerationTime(pdfGenerationDuration!)}',
+                ),
+              ],
             ),
-            const SummaryBlock(
-              title: 'Tratamiento sugerido',
-              body:
-                  'Antihistaminico oral por 7 dias, lavado nasal y control si persisten sintomas.',
-            ),
-            const SummaryBlock(
-              title: 'Observaciones',
-              body:
-                  'Se recomienda evitar polvo, perfumes intensos y registrar evolucion.',
-            ),
+            if (audioPath != null) const SizedBox(height: 10),
+            if (audioPath != null)
+              Text(
+                'La grabacion se guarda en almacenamiento privado de la app.',
+                style: TextStyle(color: Colors.grey.shade700),
+              ),
+            if (pdfPath != null) const SizedBox(height: 8),
+            if (pdfPath != null)
+              Text(
+                'PDF local: $pdfPath',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: Colors.grey.shade700, fontSize: 12),
+              ),
           ],
         ),
       ),
@@ -1346,6 +1928,166 @@ class SummaryBlock extends StatelessWidget {
           Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
           const SizedBox(height: 4),
           Text(body),
+        ],
+      ),
+    );
+  }
+}
+
+class SoapPdfGenerator {
+  static Future<List<int>> generate({
+    required Patient patient,
+    required SoapNote soapNote,
+    required Duration audioDuration,
+    required String? audioPath,
+    required DateTime recordedAt,
+  }) async {
+    final document = pw.Document();
+    final generatedAt = DateTime.now();
+
+    document.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(34),
+        build: (context) {
+          return [
+            _header(generatedAt),
+            pw.SizedBox(height: 18),
+            _patientBox(patient, recordedAt, audioDuration, audioPath),
+            pw.SizedBox(height: 18),
+            _section('S - Subjetivo', soapNote.subjective),
+            _section('O - Objetivo', soapNote.objective),
+            _section('A - Evaluacion', soapNote.assessment),
+            _section('P - Plan', soapNote.plan),
+            _section('Resumen IA', soapNote.aiSummary),
+          ];
+        },
+        footer: (context) {
+          return pw.Align(
+            alignment: pw.Alignment.centerRight,
+            child: pw.Text(
+              'Pagina ${context.pageNumber} de ${context.pagesCount}',
+              style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey600),
+            ),
+          );
+        },
+      ),
+    );
+
+    return document.save();
+  }
+
+  static pw.Widget _header(DateTime generatedAt) {
+    return pw.Container(
+      padding: const pw.EdgeInsets.all(18),
+      decoration: pw.BoxDecoration(
+        color: PdfColor.fromHex('#17212B'),
+        borderRadius: pw.BorderRadius.circular(8),
+      ),
+      child: pw.Row(
+        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text(
+                'Sanare IA',
+                style: pw.TextStyle(
+                  color: PdfColors.white,
+                  fontSize: 24,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+              pw.SizedBox(height: 5),
+              pw.Text(
+                'Resumen clinico en formato SOAP',
+                style: const pw.TextStyle(color: PdfColors.white, fontSize: 11),
+              ),
+            ],
+          ),
+          pw.Text(
+            'Generado: ${_formatDateTime(generatedAt)}',
+            style: const pw.TextStyle(color: PdfColors.white, fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static pw.Widget _patientBox(
+    Patient patient,
+    DateTime recordedAt,
+    Duration audioDuration,
+    String? audioPath,
+  ) {
+    return pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.all(14),
+      decoration: pw.BoxDecoration(
+        border: pw.Border.all(color: PdfColor.fromHex('#D8E1DF')),
+        borderRadius: pw.BorderRadius.circular(8),
+      ),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text(
+            'Paciente',
+            style: pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.SizedBox(height: 8),
+          _metadataRow('Nombre', patient.name),
+          _metadataRow('DNI', patient.dni),
+          _metadataRow('Fecha de consulta', _formatDateTime(recordedAt)),
+          _metadataRow('Duracion de audio', _formatDuration(audioDuration)),
+          _metadataRow(
+            'Grabacion',
+            audioPath == null
+                ? 'No adjunta en esta consulta'
+                : 'Guardada localmente en el dispositivo',
+          ),
+        ],
+      ),
+    );
+  }
+
+  static pw.Widget _metadataRow(String label, String value) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 5),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(
+            width: 120,
+            child: pw.Text(
+              label,
+              style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+            ),
+          ),
+          pw.Expanded(child: pw.Text(value)),
+        ],
+      ),
+    );
+  }
+
+  static pw.Widget _section(String title, String body) {
+    return pw.Container(
+      width: double.infinity,
+      margin: const pw.EdgeInsets.only(bottom: 12),
+      padding: const pw.EdgeInsets.all(14),
+      decoration: pw.BoxDecoration(
+        color: PdfColor.fromHex('#F6F8F7'),
+        borderRadius: pw.BorderRadius.circular(8),
+      ),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text(
+            title,
+            style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.SizedBox(height: 6),
+          pw.Text(body, style: const pw.TextStyle(fontSize: 11, height: 1.35)),
         ],
       ),
     );
@@ -1982,6 +2724,30 @@ class ApiClient {
       'device_name': 'sanare_mobile',
     });
 
+    return _sessionFromAuthData(data, fallbackEmail: email);
+  }
+
+  Future<ApiSession> registerDoctor({
+    required String name,
+    required String email,
+    required String password,
+    required String passwordConfirmation,
+  }) async {
+    final data = await _post('/doctors/register', {
+      'name': name,
+      'email': email,
+      'password': password,
+      'password_confirmation': passwordConfirmation,
+      'device_name': 'sanare_mobile',
+    });
+
+    return _sessionFromAuthData(data, fallbackEmail: email);
+  }
+
+  ApiSession _sessionFromAuthData(
+    Map<String, dynamic> data, {
+    required String fallbackEmail,
+  }) {
     _token = data['token']?.toString() ?? data['access_token']?.toString();
     if (_token == null || _token!.isEmpty) {
       throw Exception('Respuesta sin token.');
@@ -2004,7 +2770,7 @@ class ApiClient {
       token: _token!,
       doctorName:
           medico['nombre']?.toString() ?? user['name']?.toString() ?? 'Medico',
-      doctorEmail: user['email']?.toString() ?? email,
+      doctorEmail: user['email']?.toString() ?? fallbackEmail,
       roles: roles,
     );
   }
@@ -2052,20 +2818,34 @@ class ApiClient {
 
   Future<void> createConsultation({
     required int pacienteId,
-    required String diagnostico,
-    required String tratamiento,
-    required String observaciones,
-    required String transcripcion,
-    required String resumenIa,
+    required SoapNote soapNote,
+    Duration? audioDuration,
+    String? audioPath,
+    String? pdfPath,
+    Duration? pdfGenerationDuration,
   }) async {
+    final vitalSigns = <String, dynamic>{'ai_summary': soapNote.aiSummary};
+    if (audioDuration != null) {
+      vitalSigns['audio_duration_seconds'] = audioDuration.inSeconds;
+    }
+    if (audioPath != null) {
+      vitalSigns['local_audio_path'] = audioPath;
+    }
+    if (pdfPath != null) {
+      vitalSigns['local_pdf_path'] = pdfPath;
+    }
+    if (pdfGenerationDuration != null) {
+      vitalSigns['pdf_generation_ms'] = pdfGenerationDuration.inMilliseconds;
+    }
+
     await _post('/consultations', {
       'patient_id': pacienteId,
-      'reason': 'Consulta IA',
-      'subjective': transcripcion,
-      'objective': observaciones,
-      'assessment': diagnostico,
-      'plan': tratamiento,
-      'vital_signs': {'ai_summary': resumenIa},
+      'reason': soapNote.reason,
+      'subjective': soapNote.subjective,
+      'objective': soapNote.objective,
+      'assessment': soapNote.assessment,
+      'plan': soapNote.plan,
+      'vital_signs': vitalSigns,
     });
   }
 
@@ -2114,6 +2894,58 @@ class ApiClient {
 
     return body;
   }
+}
+
+String _formatDuration(Duration duration) {
+  final hours = duration.inHours;
+  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+
+  if (hours > 0) {
+    return '$hours:$minutes:$seconds';
+  }
+
+  return '$minutes:$seconds';
+}
+
+String _formatGenerationTime(Duration duration) {
+  if (duration.inSeconds >= 1) {
+    final seconds = duration.inMilliseconds / 1000;
+    return '${seconds.toStringAsFixed(1)} s';
+  }
+
+  return '${duration.inMilliseconds} ms';
+}
+
+String _formatDateTime(DateTime value) {
+  final day = value.day.toString().padLeft(2, '0');
+  final month = value.month.toString().padLeft(2, '0');
+  final year = value.year.toString();
+  final hour = value.hour.toString().padLeft(2, '0');
+  final minute = value.minute.toString().padLeft(2, '0');
+
+  return '$day/$month/$year $hour:$minute';
+}
+
+String _timestampForFile(DateTime value) {
+  final year = value.year.toString();
+  final month = value.month.toString().padLeft(2, '0');
+  final day = value.day.toString().padLeft(2, '0');
+  final hour = value.hour.toString().padLeft(2, '0');
+  final minute = value.minute.toString().padLeft(2, '0');
+  final second = value.second.toString().padLeft(2, '0');
+
+  return '$year$month${day}_$hour$minute$second';
+}
+
+String _safeFilePart(String value) {
+  final normalized = value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+      .replaceAll(RegExp(r'_+'), '_')
+      .replaceAll(RegExp(r'^_|_$'), '');
+
+  return normalized.isEmpty ? 'paciente' : normalized;
 }
 
 int _ageFromDate(String? date) {
