@@ -14,6 +14,13 @@ Future<String> savePdfBytes(String fileName, List<int> bytes) async {
   return file.path;
 }
 
+Future<String> saveCsvBytes(String fileName, List<int> bytes) async {
+  final directory = await _sanareDirectory('csv');
+  final file = File('${directory.path}/$fileName');
+  await file.writeAsBytes(bytes, flush: true);
+  return file.path;
+}
+
 Future<Directory> _sanareDirectory(String child) async {
   final base = await getApplicationDocumentsDirectory();
   final directory = Directory('${base.path}/Sanare/$child');

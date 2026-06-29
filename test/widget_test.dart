@@ -36,8 +36,9 @@ void main() {
 
     expect(find.text('Consulta IA'), findsOneWidget);
     expect(find.text('Iniciar grabacion'), findsOneWidget);
+    expect(find.text('Resumen generado por IA'), findsNothing);
 
-    await tester.scrollUntilVisible(find.text('Resumen generado por IA'), 300);
-    expect(find.text('Resumen generado por IA'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('Pendiente de audio'), 300);
+    expect(find.text('Pendiente de audio'), findsOneWidget);
   });
 }

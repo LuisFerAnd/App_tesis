@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -795,6 +796,8 @@ class SoapNote {
     required this.assessment,
     required this.plan,
     required this.aiSummary,
+    this.vitalSigns = const {},
+    this.aiUsage = const {},
   });
 
   final String reason;
@@ -803,19 +806,53 @@ class SoapNote {
   final String assessment;
   final String plan;
   final String aiSummary;
+  final Map<String, String> vitalSigns;
+  final Map<String, dynamic> aiUsage;
+
+  factory SoapNote.fromDraftJson(
+    Map<String, dynamic> json, {
+    Map<String, dynamic> aiUsage = const {},
+  }) {
+    final reason = _textOrUnspecified(json['reason']);
+    final subjective = _textOrUnspecified(json['subjective']);
+    final objective = _textOrUnspecified(json['objective']);
+    final assessment = _textOrUnspecified(json['assessment']);
+    final plan = _textOrUnspecified(json['plan']);
+
+    return SoapNote(
+      reason: reason,
+      subjective: subjective,
+      objective: objective,
+      assessment: assessment,
+      plan: plan,
+      aiSummary: 'Motivo: $reason\nEvaluacion: $assessment\nPlan: $plan',
+      vitalSigns: _vitalSignsFromJson(json['vital_signs']),
+      aiUsage: aiUsage,
+    );
+  }
 }
 
-const demoSoapNote = SoapNote(
-  reason: 'Consulta IA',
-  subjective:
-      'Paciente refiere congestion nasal, estornudos frecuentes y picazon ocular desde hace tres dias.',
-  objective: 'Evitar polvo y registrar evolucion de sintomas.',
-  assessment:
-      'Cuadro compatible con rinitis alergica sin datos de alarma respiratoria.',
-  plan: 'Antihistaminico oral por 7 dias, lavado nasal y control.',
-  aiSummary:
-      'Paciente con sintomas compatibles con rinitis alergica. Se indica manejo sintomatico y control si no hay mejoria.',
-);
+class SoapDraftResult {
+  const SoapDraftResult({required this.transcript, required this.soapNote});
+
+  final String transcript;
+  final SoapNote soapNote;
+
+  factory SoapDraftResult.fromJson(Map<String, dynamic> json) {
+    final draft = json['draft'];
+    if (draft is! Map<String, dynamic>) {
+      throw Exception('Respuesta sin borrador SOAP.');
+    }
+
+    return SoapDraftResult(
+      transcript: json['transcript']?.toString() ?? '',
+      soapNote: SoapNote.fromDraftJson(
+        draft,
+        aiUsage: _aiUsageFromDraftResponse(json),
+      ),
+    );
+  }
+}
 
 class AiConsultationScreen extends StatefulWidget {
   const AiConsultationScreen({super.key, required this.apiClient});
@@ -833,13 +870,17 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
   DateTime? recordingSavedAt;
   Patient selectedPatient = mockPatients.first;
   bool isRecording = false;
-  bool hasGeneratedSummary = true;
+  bool isGeneratingSummary = false;
   bool isSaving = false;
   bool isGeneratingPdf = false;
   Duration recordingDuration = Duration.zero;
   Duration? pdfGenerationDuration;
   String? recordingPath;
   String? generatedPdfPath;
+  String? generatedTranscript;
+  SoapNote? generatedSoapNote;
+
+  bool get hasGeneratedSummary => generatedSoapNote != null;
 
   @override
   void initState() {
@@ -885,13 +926,15 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
       if (!mounted) return;
       setState(() {
         isRecording = true;
-        hasGeneratedSummary = false;
+        isGeneratingSummary = false;
         recordingStartedAt = startedAt;
         recordingSavedAt = null;
         recordingDuration = Duration.zero;
         recordingPath = null;
         generatedPdfPath = null;
         pdfGenerationDuration = null;
+        generatedTranscript = null;
+        generatedSoapNote = null;
       });
       _startRecordingTimer();
     } catch (error) {
@@ -911,15 +954,16 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
           ? recordingDuration
           : DateTime.now().difference(recordingStartedAt!);
 
+      final savedPath = stoppedPath == null || stoppedPath.isEmpty
+          ? null
+          : stoppedPath;
+
       if (!mounted) return;
       setState(() {
         isRecording = false;
         recordingDuration = duration;
-        recordingPath = stoppedPath == null || stoppedPath.isEmpty
-            ? null
-            : stoppedPath;
+        recordingPath = savedPath;
         recordingSavedAt = DateTime.now();
-        hasGeneratedSummary = true;
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -929,6 +973,10 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
           ),
         ),
       );
+
+      if (savedPath != null) {
+        unawaited(_generateSoapFromAudio(savedPath));
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => isRecording = false);
@@ -961,13 +1009,60 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
 
     if (!mounted) return;
     setState(() {
-      hasGeneratedSummary = false;
+      isGeneratingSummary = false;
       recordingDuration = Duration.zero;
       recordingPath = null;
       recordingSavedAt = null;
       generatedPdfPath = null;
       pdfGenerationDuration = null;
+      generatedTranscript = null;
+      generatedSoapNote = null;
     });
+  }
+
+  Future<void> _generateSoapFromAudio(String audioPath) async {
+    if (!widget.apiClient.isAuthenticated) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Inicia sesion para generar el SOAP con IA.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      isGeneratingSummary = true;
+      generatedPdfPath = null;
+      pdfGenerationDuration = null;
+      generatedTranscript = null;
+      generatedSoapNote = null;
+    });
+
+    try {
+      final result = await widget.apiClient.generateConsultationDraftFromAudio(
+        pacienteId: selectedPatient.id,
+        audioPath: audioPath,
+        audioDuration: recordingDuration,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        generatedTranscript = result.transcript;
+        generatedSoapNote = result.soapNote;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('SOAP generado desde el audio.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo generar el SOAP: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => isGeneratingSummary = false);
+    }
   }
 
   Future<void> _generatePdf() async {
@@ -980,13 +1075,21 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
       return;
     }
 
+    final soapNote = generatedSoapNote;
+    if (soapNote == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Genera el SOAP antes de crear el PDF.')),
+      );
+      return;
+    }
+
     setState(() => isGeneratingPdf = true);
     final stopwatch = Stopwatch()..start();
 
     try {
       final bytes = await SoapPdfGenerator.generate(
         patient: selectedPatient,
-        soapNote: demoSoapNote,
+        soapNote: soapNote,
         audioDuration: recordingDuration,
         audioPath: recordingPath,
         recordedAt: recordingSavedAt ?? DateTime.now(),
@@ -1035,11 +1138,19 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
       return;
     }
 
+    final soapNote = generatedSoapNote;
+    if (soapNote == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Genera el SOAP antes de guardar.')),
+      );
+      return;
+    }
+
     setState(() => isSaving = true);
     try {
       await widget.apiClient.createConsultation(
         pacienteId: selectedPatient.id,
-        soapNote: demoSoapNote,
+        soapNote: soapNote,
         audioDuration: recordingPath == null ? null : recordingDuration,
         audioPath: recordingPath,
         pdfPath: generatedPdfPath,
@@ -1079,7 +1190,13 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
             selectedPatient: selectedPatient,
             apiClient: widget.apiClient,
             onSelected: (patient) {
-              setState(() => selectedPatient = patient);
+              setState(() {
+                selectedPatient = patient;
+                generatedPdfPath = null;
+                pdfGenerationDuration = null;
+                generatedTranscript = null;
+                generatedSoapNote = null;
+              });
             },
           ),
           const SizedBox(height: 16),
@@ -1092,10 +1209,30 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
           const SizedBox(height: 16),
           WorkflowStatus(
             hasAudio: recordingPath != null,
+            isGeneratingSummary: isGeneratingSummary,
+            hasSummary: hasGeneratedSummary,
             hasPdf: generatedPdfPath != null,
           ),
           const SizedBox(height: 16),
-          if (hasGeneratedSummary) const AiSummaryCard(soapNote: demoSoapNote),
+          if (!isGeneratingSummary &&
+              recordingPath != null &&
+              !hasGeneratedSummary)
+            OutlinedButton.icon(
+              onPressed: () => _generateSoapFromAudio(recordingPath!),
+              icon: const Icon(Icons.auto_awesome_outlined),
+              label: const Text('Generar SOAP'),
+            ),
+          if (!isGeneratingSummary &&
+              recordingPath != null &&
+              !hasGeneratedSummary)
+            const SizedBox(height: 16),
+          if (isGeneratingSummary) const AiGenerationCard(),
+          if (isGeneratingSummary) const SizedBox(height: 16),
+          if (hasGeneratedSummary)
+            AiSummaryCard(
+              soapNote: generatedSoapNote!,
+              transcript: generatedTranscript,
+            ),
           if (hasGeneratedSummary) const SizedBox(height: 16),
           if (hasGeneratedSummary)
             ConsultationOutputStatus(
@@ -1323,8 +1460,10 @@ class _PatientsScreenState extends State<PatientsScreen> {
                         onTap: () {
                           Navigator.of(context).push(
                             MaterialPageRoute(
-                              builder: (_) =>
-                                  PatientDetailScreen(patient: patient),
+                              builder: (_) => PatientDetailScreen(
+                                patient: patient,
+                                apiClient: widget.apiClient,
+                              ),
                             ),
                           );
                         },
@@ -1340,25 +1479,76 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 }
 
-class HistoryScreen extends StatelessWidget {
+class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key, required this.apiClient});
 
   final ApiClient apiClient;
+
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  bool isExportingCosts = false;
+
+  Future<void> _exportCostsCsv() async {
+    if (!widget.apiClient.isAuthenticated) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Inicia sesion para exportar costos.')),
+      );
+      return;
+    }
+
+    setState(() => isExportingCosts = true);
+
+    try {
+      final path = await widget.apiClient.exportConsultationCostsCsv();
+
+      if (path.isNotEmpty) {
+        unawaited(OpenFilex.open(path));
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('CSV exportado: $path')));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo exportar el CSV: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => isExportingCosts = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
       title: 'Consultas y PDF',
       subtitle: 'Resumenes generados por IA',
+      actions: [
+        IconButton(
+          tooltip: 'Exportar costos CSV',
+          onPressed: isExportingCosts ? null : _exportCostsCsv,
+          icon: isExportingCosts
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.table_view_outlined),
+        ),
+      ],
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
         children: [
           const SearchBox(label: 'Buscar consulta o paciente'),
           const SizedBox(height: 16),
           FutureBuilder<List<ConsultationSummary>>(
-            future: apiClient.isAuthenticated
-                ? apiClient.fetchConsultations()
-                : Future.value(mockConsultations),
+            future: widget.apiClient.isAuthenticated
+                ? widget.apiClient.fetchConsultations()
+                : Future.value(const <ConsultationSummary>[]),
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Center(
@@ -1373,12 +1563,13 @@ class HistoryScreen extends StatelessWidget {
                 return ErrorCard(message: snapshot.error.toString());
               }
 
-              final consultations = snapshot.data ?? mockConsultations;
+              final consultations =
+                  snapshot.data ?? const <ConsultationSummary>[];
               if (consultations.isEmpty) {
                 return const EmptyState(
                   icon: Icons.picture_as_pdf_outlined,
                   title: 'Sin consultas',
-                  body: 'Cuando guardes una consulta SOAP aparecera aqui.',
+                  body: 'Cuando guardes una consulta SOAP real aparecera aqui.',
                 );
               }
 
@@ -1488,49 +1679,134 @@ class AccountScreen extends StatelessWidget {
   }
 }
 
-class PatientDetailScreen extends StatelessWidget {
-  const PatientDetailScreen({super.key, required this.patient});
+class PatientDetailScreen extends StatefulWidget {
+  const PatientDetailScreen({
+    super.key,
+    required this.patient,
+    required this.apiClient,
+  });
 
   final Patient patient;
+  final ApiClient apiClient;
+
+  @override
+  State<PatientDetailScreen> createState() => _PatientDetailScreenState();
+}
+
+class _PatientDetailScreenState extends State<PatientDetailScreen> {
+  late Future<List<ConsultationRecord>> consultationsFuture;
+  int? generatingPdfConsultationId;
+
+  @override
+  void initState() {
+    super.initState();
+    consultationsFuture = _loadConsultations();
+  }
+
+  Future<List<ConsultationRecord>> _loadConsultations() {
+    return widget.apiClient.isAuthenticated
+        ? widget.apiClient.fetchPatientConsultations(widget.patient.id)
+        : Future.value(const <ConsultationRecord>[]);
+  }
+
+  void _refreshConsultations() {
+    setState(() {
+      consultationsFuture = _loadConsultations();
+    });
+  }
+
+  Future<void> _downloadPdf(ConsultationRecord consultation) async {
+    setState(() => generatingPdfConsultationId = consultation.id);
+
+    try {
+      final bytes = await SoapPdfGenerator.generate(
+        patient: consultation.patient,
+        soapNote: consultation.soapNote,
+        audioDuration: consultation.audioDuration,
+        audioPath: consultation.audioPath,
+        recordedAt: consultation.consultedAt,
+      );
+      final fileName =
+          'sanare_soap_${_safeFilePart(consultation.patient.name)}_${_timestampForFile(consultation.consultedAt)}.pdf';
+      final path = await savePdfBytes(fileName, bytes);
+
+      if (path.isNotEmpty) {
+        unawaited(OpenFilex.open(path));
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('PDF descargado: ${consultation.title}')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo descargar el PDF: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => generatingPdfConsultationId = null);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
-      title: patient.name,
-      subtitle: 'Datos minimos para consulta',
+      title: widget.patient.name,
+      subtitle: 'Consultas y documentos',
       actions: [
         IconButton(
-          tooltip: 'Editar',
-          onPressed: () {},
-          icon: const Icon(Icons.edit_outlined),
+          tooltip: 'Actualizar',
+          onPressed: _refreshConsultations,
+          icon: const Icon(Icons.refresh),
         ),
       ],
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
         children: [
-          PatientSummary(patient: patient),
+          PatientSummary(patient: widget.patient),
           const SizedBox(height: 18),
-          FilledButton.icon(
-            onPressed: () {},
-            icon: const Icon(Icons.mic_outlined),
-            label: const Text('Iniciar consulta grabada'),
-          ),
-          const SizedBox(height: 18),
-          const SectionTitle(title: 'Ultimos resumenes'),
+          const SectionTitle(title: 'Consultas realizadas'),
           const SizedBox(height: 10),
-          const ActivityTile(
-            icon: Icons.auto_awesome_outlined,
-            color: Color(0xFF087F7A),
-            title: 'Resumen IA',
-            body: 'Rinitis alergica, control y tratamiento.',
-            time: 'Hoy',
-          ),
-          const ActivityTile(
-            icon: Icons.picture_as_pdf_outlined,
-            color: Color(0xFFE7793F),
-            title: 'PDF generado',
-            body: 'Consulta #1042',
-            time: 'Hoy',
+          FutureBuilder<List<ConsultationRecord>>(
+            future: consultationsFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: CircularProgressIndicator(),
+                  ),
+                );
+              }
+
+              if (snapshot.hasError) {
+                return ErrorCard(message: snapshot.error.toString());
+              }
+
+              final consultations =
+                  snapshot.data ?? const <ConsultationRecord>[];
+              if (consultations.isEmpty) {
+                return const EmptyState(
+                  icon: Icons.description_outlined,
+                  title: 'Sin consultas',
+                  body:
+                      'Las consultas guardadas de este paciente apareceran aqui.',
+                );
+              }
+
+              return Column(
+                children: consultations
+                    .map(
+                      (consultation) => PatientConsultationCard(
+                        consultation: consultation,
+                        isDownloading:
+                            generatingPdfConsultationId == consultation.id,
+                        onDownloadPdf: () => _downloadPdf(consultation),
+                      ),
+                    )
+                    .toList(),
+              );
+            },
           ),
         ],
       ),
@@ -1575,6 +1851,11 @@ class PatientSelector extends StatelessWidget {
                         (item) => item.id == selectedPatient.id,
                       )
                     : patients.first;
+                if (!_samePatient(value, selectedPatient)) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    onSelected(value);
+                  });
+                }
 
                 return DropdownButtonFormField<Patient>(
                   initialValue: value,
@@ -1711,10 +1992,14 @@ class WorkflowStatus extends StatelessWidget {
   const WorkflowStatus({
     super.key,
     required this.hasAudio,
+    required this.isGeneratingSummary,
+    required this.hasSummary,
     required this.hasPdf,
   });
 
   final bool hasAudio;
+  final bool isGeneratingSummary;
+  final bool hasSummary;
   final bool hasPdf;
 
   @override
@@ -1737,15 +2022,23 @@ class WorkflowStatus extends StatelessWidget {
                   ? 'Grabacion disponible en almacenamiento local'
                   : 'Consulta capturada desde el telefono',
             ),
-            const FlowStep(
+            FlowStep(
               icon: Icons.text_snippet_outlined,
               title: '2. Transcribir',
-              body: 'Pendiente de conectar a un servicio de transcripcion',
+              body: hasSummary
+                  ? 'Transcripcion recibida desde IA'
+                  : isGeneratingSummary
+                  ? 'Transcribiendo audio'
+                  : 'Pendiente de audio',
             ),
-            const FlowStep(
+            FlowStep(
               icon: Icons.auto_awesome_outlined,
               title: '3. Resumir con IA',
-              body: 'SOAP listo con datos demo editables despues',
+              body: hasSummary
+                  ? 'SOAP generado con el audio'
+                  : isGeneratingSummary
+                  ? 'Construyendo documento SOAP'
+                  : 'Pendiente de transcripcion',
             ),
             FlowStep(
               icon: Icons.picture_as_pdf_outlined,
@@ -1801,13 +2094,48 @@ class FlowStep extends StatelessWidget {
   }
 }
 
-class AiSummaryCard extends StatelessWidget {
-  const AiSummaryCard({super.key, required this.soapNote});
-
-  final SoapNote soapNote;
+class AiGenerationCard extends StatelessWidget {
+  const AiGenerationCard({super.key});
 
   @override
   Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.4),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Generando SOAP desde el audio',
+                style: TextStyle(
+                  color: Colors.grey.shade800,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class AiSummaryCard extends StatelessWidget {
+  const AiSummaryCard({super.key, required this.soapNote, this.transcript});
+
+  final SoapNote soapNote;
+  final String? transcript;
+
+  @override
+  Widget build(BuildContext context) {
+    final cleanTranscript = transcript?.trim();
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -1831,13 +2159,55 @@ class AiSummaryCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 14),
+            if (cleanTranscript != null && cleanTranscript.isNotEmpty)
+              SummaryBlock(title: 'Transcripcion', body: cleanTranscript),
+            if (cleanTranscript != null && cleanTranscript.isNotEmpty)
+              const SizedBox(height: 8),
+            SummaryBlock(title: 'Motivo', body: soapNote.reason),
+            const SizedBox(height: 8),
+            if (soapNote.aiUsage.isNotEmpty)
+              AiUsagePills(aiUsage: soapNote.aiUsage),
+            if (soapNote.aiUsage.isNotEmpty) const SizedBox(height: 12),
+            if (soapNote.vitalSigns.isNotEmpty)
+              SummaryBlock(
+                title: 'Signos vitales',
+                body: _formatVitalSigns(soapNote.vitalSigns),
+              ),
+            if (soapNote.vitalSigns.isNotEmpty) const SizedBox(height: 8),
             SummaryBlock(title: 'S - Subjetivo', body: soapNote.subjective),
+            const SizedBox(height: 8),
             SummaryBlock(title: 'O - Objetivo', body: soapNote.objective),
+            const SizedBox(height: 8),
             SummaryBlock(title: 'A - Evaluacion', body: soapNote.assessment),
+            const SizedBox(height: 8),
             SummaryBlock(title: 'P - Plan', body: soapNote.plan),
           ],
         ),
       ),
+    );
+  }
+}
+
+class AiUsagePills extends StatelessWidget {
+  const AiUsagePills({super.key, required this.aiUsage});
+
+  final Map<String, dynamic> aiUsage;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        InfoPill(
+          icon: Icons.token_outlined,
+          text: '${_intOrZero(aiUsage['soap_total_tokens'])} tokens',
+        ),
+        InfoPill(
+          icon: Icons.attach_money_outlined,
+          text: _formatUsd(_doubleOrZero(aiUsage['estimated_total_cost_usd'])),
+        ),
+      ],
     );
   }
 }
@@ -1955,6 +2325,12 @@ class SoapPdfGenerator {
             pw.SizedBox(height: 18),
             _patientBox(patient, recordedAt, audioDuration, audioPath),
             pw.SizedBox(height: 18),
+            _section('Motivo de consulta', soapNote.reason),
+            if (soapNote.vitalSigns.isNotEmpty)
+              _section(
+                'Signos vitales',
+                _formatVitalSigns(soapNote.vitalSigns),
+              ),
             _section('S - Subjetivo', soapNote.subjective),
             _section('O - Objetivo', soapNote.objective),
             _section('A - Evaluacion', soapNote.assessment),
@@ -2269,6 +2645,95 @@ class ErrorCard extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(child: Text(message)),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class PatientConsultationCard extends StatelessWidget {
+  const PatientConsultationCard({
+    super.key,
+    required this.consultation,
+    required this.isDownloading,
+    required this.onDownloadPdf,
+  });
+
+  final ConsultationRecord consultation;
+  final bool isDownloading;
+  final VoidCallback onDownloadPdf;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CircleAvatar(
+                    backgroundColor: const Color(0xFFE9F1FF),
+                    child: Icon(
+                      Icons.description_outlined,
+                      color: Theme.of(context).colorScheme.tertiary,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          consultation.title,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          consultation.date,
+                          style: TextStyle(color: Colors.grey.shade700),
+                        ),
+                      ],
+                    ),
+                  ),
+                  StatusBadge(text: consultation.status),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                consultation.soapNote.aiSummary,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: isDownloading ? null : onDownloadPdf,
+                      icon: isDownloading
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.download_outlined),
+                      label: Text(
+                        isDownloading ? 'Preparando...' : 'Descargar PDF',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2609,6 +3074,86 @@ const mockPatients = [
   ),
 ];
 
+class ConsultationRecord {
+  const ConsultationRecord({
+    required this.id,
+    required this.patient,
+    required this.title,
+    required this.date,
+    required this.status,
+    required this.consultedAt,
+    required this.soapNote,
+    required this.audioDuration,
+    this.audioPath,
+    this.localPdfPath,
+    this.pdfUrl,
+  });
+
+  final int id;
+  final Patient patient;
+  final String title;
+  final String date;
+  final String status;
+  final DateTime consultedAt;
+  final SoapNote soapNote;
+  final Duration audioDuration;
+  final String? audioPath;
+  final String? localPdfPath;
+  final String? pdfUrl;
+
+  factory ConsultationRecord.fromJson(
+    Map<String, dynamic> json, {
+    Patient? fallbackPatient,
+  }) {
+    final patientJson = json['patient'] is Map<String, dynamic>
+        ? json['patient'] as Map<String, dynamic>
+        : json['paciente'] is Map<String, dynamic>
+        ? json['paciente'] as Map<String, dynamic>
+        : null;
+    final patient = patientJson == null
+        ? fallbackPatient ?? mockPatients.first
+        : Patient.fromJson(patientJson);
+    final vitalSigns = json['vital_signs'] is Map<String, dynamic>
+        ? json['vital_signs'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    final reason = _textOrUnspecified(json['reason']);
+    final assessment = _textOrUnspecified(json['assessment']);
+    final rawDate =
+        json['consulted_at']?.toString() ?? json['created_at']?.toString();
+    final consultedAt = DateTime.tryParse(rawDate ?? '') ?? DateTime.now();
+    final localPdfPath = _nullableText(vitalSigns['local_pdf_path']);
+    final pdfUrl = _nullableText(json['pdf_url']);
+    final audioSeconds = _intOrZero(vitalSigns['audio_duration_seconds']);
+
+    return ConsultationRecord(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      patient: patient,
+      title: reason == 'no especificado' ? assessment : reason,
+      date: _formatDateTime(consultedAt),
+      status: localPdfPath == null && pdfUrl == null
+          ? 'SOAP guardado'
+          : 'PDF disponible',
+      consultedAt: consultedAt,
+      soapNote: SoapNote(
+        reason: reason,
+        subjective: _textOrUnspecified(json['subjective']),
+        objective: _textOrUnspecified(json['objective']),
+        assessment: assessment,
+        plan: _textOrUnspecified(json['plan']),
+        aiSummary:
+            _nullableText(vitalSigns['ai_summary']) ??
+            'Motivo: $reason\nEvaluacion: $assessment\nPlan: ${_textOrUnspecified(json['plan'])}',
+        vitalSigns: _vitalSignsFromJson(vitalSigns),
+        aiUsage: _mapFromJson(vitalSigns['ai_usage']),
+      ),
+      audioDuration: Duration(seconds: audioSeconds),
+      audioPath: _nullableText(vitalSigns['local_audio_path']),
+      localPdfPath: localPdfPath,
+      pdfUrl: pdfUrl,
+    );
+  }
+}
+
 class ConsultationSummary {
   const ConsultationSummary({
     required this.patient,
@@ -2655,27 +3200,6 @@ class ConsultationSummary {
   }
 }
 
-const mockConsultations = [
-  ConsultationSummary(
-    patient: 'Ana Lopez',
-    title: 'Consulta por rinitis alergica',
-    date: 'Hoy, 10:30 AM',
-    status: 'PDF listo',
-  ),
-  ConsultationSummary(
-    patient: 'Carlos Mejia',
-    title: 'Control de hipertension arterial',
-    date: 'Ayer, 3:15 PM',
-    status: 'Guardado',
-  ),
-  ConsultationSummary(
-    patient: 'Rosa Martinez',
-    title: 'Dolor abdominal y gastritis',
-    date: '3 jun, 8:45 AM',
-    status: 'PDF listo',
-  ),
-];
-
 class ApiSession {
   const ApiSession({
     required this.token,
@@ -2710,6 +3234,13 @@ class ApiClient {
     return {
       'Accept': 'application/json',
       'Content-Type': 'application/json',
+      if (_token != null) 'Authorization': 'Bearer $_token',
+    };
+  }
+
+  Map<String, String> get _multipartHeaders {
+    return {
+      'Accept': 'application/json',
       if (_token != null) 'Authorization': 'Bearer $_token',
     };
   }
@@ -2797,6 +3328,46 @@ class ApiClient {
         .toList();
   }
 
+  Future<List<ConsultationRecord>> fetchPatientConsultations(
+    int patientId,
+  ) async {
+    final data = _isAdmin
+        ? await _get('/admin/consultations?per_page=100')
+        : await _get('/consultations?patient_id=$patientId');
+    final items = _itemsFrom(data, 'consultations');
+
+    return items
+        .whereType<Map<String, dynamic>>()
+        .where((item) {
+          if (!_isAdmin) return true;
+
+          final patient = item['patient'];
+          return patient is Map<String, dynamic> &&
+              (patient['id'] as num?)?.toInt() == patientId;
+        })
+        .map((item) => ConsultationRecord.fromJson(item))
+        .toList();
+  }
+
+  Future<String> exportConsultationCostsCsv() async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/consultations/costs/export'),
+      headers: {
+        'Accept': 'text/csv',
+        if (_token != null) 'Authorization': 'Bearer $_token',
+      },
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      _decode(response);
+    }
+
+    return saveCsvBytes(
+      'sanare_costos_consultas_${_timestampForFile(DateTime.now())}.csv',
+      response.bodyBytes,
+    );
+  }
+
   Future<Patient> createPatient({
     required String firstName,
     required String lastName,
@@ -2824,7 +3395,13 @@ class ApiClient {
     String? pdfPath,
     Duration? pdfGenerationDuration,
   }) async {
-    final vitalSigns = <String, dynamic>{'ai_summary': soapNote.aiSummary};
+    final vitalSigns = <String, dynamic>{
+      ...soapNote.vitalSigns,
+      'ai_summary': soapNote.aiSummary,
+    };
+    if (soapNote.aiUsage.isNotEmpty) {
+      vitalSigns['ai_usage'] = soapNote.aiUsage;
+    }
     if (audioDuration != null) {
       vitalSigns['audio_duration_seconds'] = audioDuration.inSeconds;
     }
@@ -2847,6 +3424,35 @@ class ApiClient {
       'plan': soapNote.plan,
       'vital_signs': vitalSigns,
     });
+  }
+
+  Future<SoapDraftResult> generateConsultationDraftFromAudio({
+    required int pacienteId,
+    required String audioPath,
+    required Duration audioDuration,
+  }) async {
+    final request =
+        http.MultipartRequest(
+            'POST',
+            Uri.parse('$baseUrl/ai/consultation-draft'),
+          )
+          ..headers.addAll(_multipartHeaders)
+          ..fields['patient_id'] = pacienteId.toString()
+          ..fields['audio_duration_seconds'] = audioDuration.inSeconds
+              .toString()
+          ..files.add(
+            await http.MultipartFile.fromPath(
+              'audio',
+              audioPath,
+              contentType: MediaType('audio', 'mp4'),
+            ),
+          );
+
+    final response = await request.send();
+    final body = await response.stream.bytesToString();
+    final data = _decodeBody(response.statusCode, body);
+
+    return SoapDraftResult.fromJson(data);
   }
 
   List<dynamic> _itemsFrom(Map<String, dynamic> data, String key) {
@@ -2882,14 +3488,16 @@ class ApiClient {
   }
 
   Map<String, dynamic> _decode(http.Response response) {
-    final body = response.body.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(response.body) as Map<String, dynamic>;
+    return _decodeBody(response.statusCode, response.body);
+  }
 
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception(
-        body['message']?.toString() ?? 'HTTP ${response.statusCode}',
-      );
+  Map<String, dynamic> _decodeBody(int statusCode, String responseBody) {
+    final body = responseBody.isEmpty
+        ? <String, dynamic>{}
+        : jsonDecode(responseBody) as Map<String, dynamic>;
+
+    if (statusCode < 200 || statusCode >= 300) {
+      throw Exception(body['message']?.toString() ?? 'HTTP $statusCode');
     }
 
     return body;
@@ -2907,6 +3515,129 @@ String _formatDuration(Duration duration) {
 
   return '$minutes:$seconds';
 }
+
+String _textOrUnspecified(Object? value) {
+  final text = value?.toString().trim() ?? '';
+
+  return _isSpecifiedText(text) ? text : 'no especificado';
+}
+
+String? _nullableText(Object? value) {
+  final text = value?.toString().trim() ?? '';
+
+  return _isSpecifiedText(text) ? text : null;
+}
+
+int _intOrZero(Object? value) {
+  if (value is num) return value.toInt();
+
+  return int.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+double _doubleOrZero(Object? value) {
+  if (value is num) return value.toDouble();
+
+  return double.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+String _formatUsd(double value) {
+  return 'USD ${value.toStringAsFixed(value < 0.01 ? 6 : 2)}';
+}
+
+Map<String, String> _vitalSignsFromJson(Object? value) {
+  if (value is! Map<String, dynamic>) return const {};
+
+  final signs = <String, String>{};
+  for (final entry in value.entries) {
+    if (_metadataVitalSignKeys.contains(entry.key)) continue;
+
+    if (entry.value is List) {
+      final items = (entry.value as List)
+          .map((item) => item.toString().trim())
+          .where(_isSpecifiedText)
+          .toList(growable: false);
+      if (items.isNotEmpty) signs[entry.key] = items.join(', ');
+      continue;
+    }
+
+    final text = entry.value?.toString().trim() ?? '';
+    if (_isSpecifiedText(text)) signs[entry.key] = text;
+  }
+
+  return signs;
+}
+
+Map<String, dynamic> _aiUsageFromDraftResponse(Map<String, dynamic> json) {
+  final usage = _mapFromJson(json['usage']);
+  final cost = _mapFromJson(json['cost']);
+  final models = _mapFromJson(json['models']);
+
+  return {
+    ...cost,
+    if (models['transcription'] != null)
+      'transcription_model': models['transcription'],
+    if (models['soap_formatter'] != null)
+      'soap_model': models['soap_formatter'],
+    if (usage['input_tokens'] != null)
+      'soap_input_tokens': usage['input_tokens'],
+    if (usage['output_tokens'] != null)
+      'soap_output_tokens': usage['output_tokens'],
+    if (usage['total_tokens'] != null)
+      'soap_total_tokens': usage['total_tokens'],
+  };
+}
+
+Map<String, dynamic> _mapFromJson(Object? value) {
+  return value is Map<String, dynamic> ? value : const {};
+}
+
+String _formatVitalSigns(Map<String, String> vitalSigns) {
+  return vitalSigns.entries
+      .map((entry) => '${_vitalSignLabel(entry.key)}: ${entry.value}')
+      .join('\n');
+}
+
+String _vitalSignLabel(String key) {
+  return switch (key) {
+    'temperature' => 'Temperatura',
+    'blood_pressure' => 'Presion arterial',
+    'heart_rate' => 'Frecuencia cardiaca',
+    'respiratory_rate' => 'Frecuencia respiratoria',
+    'oxygen_saturation' => 'Saturacion de oxigeno',
+    'weight' => 'Peso',
+    'height' => 'Talla',
+    'other' => 'Otros',
+    _ => key,
+  };
+}
+
+bool _isSpecifiedText(String value) {
+  final normalized = value
+      .trim()
+      .toLowerCase()
+      .replaceAll('.', '')
+      .replaceAll(':', '');
+
+  return normalized.isNotEmpty &&
+      normalized != 'null' &&
+      normalized != 'no especificado' &&
+      normalized != 'no especificada';
+}
+
+bool _samePatient(Patient first, Patient second) {
+  return first.id == second.id &&
+      first.name == second.name &&
+      first.dni == second.dni;
+}
+
+const _metadataVitalSignKeys = {
+  'ai_summary',
+  'audio_duration_seconds',
+  'local_audio_path',
+  'local_pdf_path',
+  'pdf_generation_ms',
+  'ai_usage',
+};
 
 String _formatGenerationTime(Duration duration) {
   if (duration.inSeconds >= 1) {
