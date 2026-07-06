@@ -1,10 +1,16 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'package:sanare_mobile/main.dart';
 
 void main() {
+  setUp(() {
+    FlutterSecureStorage.setMockInitialValues({});
+  });
+
   testWidgets('shows the Sanare login screen', (WidgetTester tester) async {
     await tester.pumpWidget(const SanareMobileApp());
+    await tester.pumpAndSettle();
 
     expect(find.text('Sanare IA'), findsOneWidget);
     expect(find.text('Acceso medico'), findsOneWidget);
@@ -17,6 +23,7 @@ void main() {
     WidgetTester tester,
   ) async {
     await tester.pumpWidget(const SanareMobileApp());
+    await tester.pumpAndSettle();
 
     await tester.ensureVisible(find.text('Crear cuenta medica'));
     await tester.tap(find.text('Crear cuenta medica'));
@@ -27,18 +34,12 @@ void main() {
     expect(find.text('Crear cuenta'), findsOneWidget);
   });
 
-  testWidgets('navigates to the mobile shell', (WidgetTester tester) async {
+  testWidgets('does not expose demo access on login', (
+    WidgetTester tester,
+  ) async {
     await tester.pumpWidget(const SanareMobileApp());
-
-    await tester.ensureVisible(find.text('Continuar en modo demo'));
-    await tester.tap(find.text('Continuar en modo demo'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Consulta IA'), findsOneWidget);
-    expect(find.text('Iniciar grabacion'), findsOneWidget);
-    expect(find.text('Resumen generado por IA'), findsNothing);
-
-    await tester.scrollUntilVisible(find.text('Pendiente de audio'), 300);
-    expect(find.text('Pendiente de audio'), findsOneWidget);
+    expect(find.text('Continuar en modo demo'), findsNothing);
   });
 }

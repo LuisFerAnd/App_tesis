@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:open_filex/open_filex.dart';
@@ -76,9 +77,65 @@ class SanareMobileApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const LoginScreen(),
+      home: const AuthGate(),
     );
   }
+}
+
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  late final Future<_RestoredAuth?> restoredAuthFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    restoredAuthFuture = _restoreAuth();
+  }
+
+  Future<_RestoredAuth?> _restoreAuth() async {
+    final apiClient = ApiClient();
+    final session = await apiClient.restoreSession();
+    if (session == null) return null;
+
+    return _RestoredAuth(apiClient: apiClient, session: session);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_RestoredAuth?>(
+      future: restoredAuthFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        final restoredAuth = snapshot.data;
+        if (restoredAuth == null) {
+          return const LoginScreen();
+        }
+
+        return MobileShell(
+          apiClient: restoredAuth.apiClient,
+          session: restoredAuth.session,
+        );
+      },
+    );
+  }
+}
+
+class _RestoredAuth {
+  const _RestoredAuth({required this.apiClient, required this.session});
+
+  final ApiClient apiClient;
+  final ApiSession session;
 }
 
 class LoginScreen extends StatefulWidget {
@@ -128,12 +185,6 @@ class _LoginScreenState extends State<LoginScreen> {
     } finally {
       if (mounted) setState(() => isLoading = false);
     }
-  }
-
-  void _openDemo() {
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => MobileShell(apiClient: ApiClient())),
-    );
   }
 
   void _openRegister() {
@@ -371,19 +422,6 @@ class _LoginScreenState extends State<LoginScreen> {
                                     label: Text(
                                       isLoading ? 'Verificando...' : 'Ingresar',
                                     ),
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                SizedBox(
-                                  width: double.infinity,
-                                  height: 48,
-                                  child: OutlinedButton.icon(
-                                    onPressed: isLoading ? null : _openDemo,
-                                    icon: const Icon(
-                                      Icons.explore_outlined,
-                                      size: 20,
-                                    ),
-                                    label: const Text('Continuar en modo demo'),
                                   ),
                                 ),
                                 const SizedBox(height: 10),
@@ -753,7 +791,7 @@ class _MobileShellState extends State<MobileShell> {
       AiConsultationScreen(apiClient: widget.apiClient),
       PatientsScreen(apiClient: widget.apiClient),
       HistoryScreen(apiClient: widget.apiClient),
-      AccountScreen(session: widget.session),
+      AccountScreen(apiClient: widget.apiClient, session: widget.session),
     ];
 
     return Scaffold(
@@ -863,16 +901,18 @@ class AiConsultationScreen extends StatefulWidget {
   State<AiConsultationScreen> createState() => _AiConsultationScreenState();
 }
 
-class _AiConsultationScreenState extends State<AiConsultationScreen> {
+class _AiConsultationScreenState extends State<AiConsultationScreen>
+    with WidgetsBindingObserver {
   late final AudioRecorder audioRecorder;
   Timer? recordingTimer;
   DateTime? recordingStartedAt;
   DateTime? recordingSavedAt;
-  Patient selectedPatient = mockPatients.first;
+  Patient? selectedPatient;
   bool isRecording = false;
   bool isGeneratingSummary = false;
   bool isSaving = false;
   bool isGeneratingPdf = false;
+  bool recordingInterruptedBySystem = false;
   Duration recordingDuration = Duration.zero;
   Duration? pdfGenerationDuration;
   String? recordingPath;
@@ -885,14 +925,45 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     audioRecorder = AudioRecorder();
+    if (!widget.apiClient.isAuthenticated) {
+      selectedPatient = mockPatients.first;
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     recordingTimer?.cancel();
     unawaited(audioRecorder.dispose());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if ((state == AppLifecycleState.inactive ||
+            state == AppLifecycleState.paused) &&
+        isRecording) {
+      recordingInterruptedBySystem = true;
+      unawaited(
+        _stopRecording(autoGenerateSoap: false, showSavedMessage: false),
+      );
+      return;
+    }
+
+    if (state == AppLifecycleState.resumed && recordingInterruptedBySystem) {
+      recordingInterruptedBySystem = false;
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'La grabacion se pauso por una interrupcion. Puedes generar el SOAP con el audio guardado o iniciar otra grabacion.',
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _startRecording() async {
@@ -945,7 +1016,10 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
     }
   }
 
-  Future<void> _stopRecording() async {
+  Future<void> _stopRecording({
+    bool autoGenerateSoap = true,
+    bool showSavedMessage = true,
+  }) async {
     try {
       final stoppedPath = await audioRecorder.stop();
       recordingTimer?.cancel();
@@ -966,15 +1040,17 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
         recordingSavedAt = DateTime.now();
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Grabacion guardada localmente (${_formatDuration(duration)}).',
+      if (showSavedMessage) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Grabacion guardada localmente (${_formatDuration(duration)}).',
+            ),
           ),
-        ),
-      );
+        );
+      }
 
-      if (savedPath != null) {
+      if (savedPath != null && autoGenerateSoap) {
         unawaited(_generateSoapFromAudio(savedPath));
       }
     } catch (error) {
@@ -1021,6 +1097,17 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
   }
 
   Future<void> _generateSoapFromAudio(String audioPath) async {
+    final patient = selectedPatient;
+    if (patient == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Agrega o selecciona un paciente antes de continuar.'),
+        ),
+      );
+      return;
+    }
+
     if (!widget.apiClient.isAuthenticated) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1041,7 +1128,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
 
     try {
       final result = await widget.apiClient.generateConsultationDraftFromAudio(
-        pacienteId: selectedPatient.id,
+        pacienteId: patient.id,
         audioPath: audioPath,
         audioDuration: recordingDuration,
       );
@@ -1076,9 +1163,18 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
     }
 
     final soapNote = generatedSoapNote;
+    final patient = selectedPatient;
     if (soapNote == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Genera el SOAP antes de crear el PDF.')),
+      );
+      return;
+    }
+    if (patient == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Agrega o selecciona un paciente antes de continuar.'),
+        ),
       );
       return;
     }
@@ -1088,14 +1184,14 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
 
     try {
       final bytes = await SoapPdfGenerator.generate(
-        patient: selectedPatient,
+        patient: patient,
         soapNote: soapNote,
         audioDuration: recordingDuration,
         audioPath: recordingPath,
         recordedAt: recordingSavedAt ?? DateTime.now(),
       );
       final fileName =
-          'sanare_soap_${_safeFilePart(selectedPatient.name)}_${_timestampForFile(DateTime.now())}.pdf';
+          'sanare_soap_${_safeFilePart(patient.name)}_${_timestampForFile(DateTime.now())}.pdf';
       final path = await savePdfBytes(fileName, bytes);
 
       stopwatch.stop();
@@ -1132,16 +1228,25 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
     if (!widget.apiClient.isAuthenticated) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Modo demo: inicia sesion para guardar en Sanare.'),
+          content: Text('Inicia sesion para guardar la consulta en Sanare.'),
         ),
       );
       return;
     }
 
     final soapNote = generatedSoapNote;
+    final patient = selectedPatient;
     if (soapNote == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Genera el SOAP antes de guardar.')),
+      );
+      return;
+    }
+    if (patient == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Agrega o selecciona un paciente antes de continuar.'),
+        ),
       );
       return;
     }
@@ -1149,7 +1254,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
     setState(() => isSaving = true);
     try {
       await widget.apiClient.createConsultation(
-        pacienteId: selectedPatient.id,
+        pacienteId: patient.id,
         soapNote: soapNote,
         audioDuration: recordingPath == null ? null : recordingDuration,
         audioPath: recordingPath,
@@ -1173,6 +1278,8 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final patient = selectedPatient;
+
     return AppScaffold(
       title: 'Consulta IA',
       subtitle: 'Grabar, resumir y generar PDF',
@@ -1187,7 +1294,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
         children: [
           PatientSelector(
-            selectedPatient: selectedPatient,
+            selectedPatient: patient,
             apiClient: widget.apiClient,
             onSelected: (patient) {
               setState(() {
@@ -1199,83 +1306,88 @@ class _AiConsultationScreenState extends State<AiConsultationScreen> {
               });
             },
           ),
-          const SizedBox(height: 16),
-          RecordingPanel(
-            isRecording: isRecording,
-            duration: recordingDuration,
-            audioPath: recordingPath,
-            onToggle: _toggleRecording,
-          ),
-          const SizedBox(height: 16),
-          WorkflowStatus(
-            hasAudio: recordingPath != null,
-            isGeneratingSummary: isGeneratingSummary,
-            hasSummary: hasGeneratedSummary,
-            hasPdf: generatedPdfPath != null,
-          ),
-          const SizedBox(height: 16),
-          if (!isGeneratingSummary &&
-              recordingPath != null &&
-              !hasGeneratedSummary)
-            OutlinedButton.icon(
-              onPressed: () => _generateSoapFromAudio(recordingPath!),
-              icon: const Icon(Icons.auto_awesome_outlined),
-              label: const Text('Generar SOAP'),
-            ),
-          if (!isGeneratingSummary &&
-              recordingPath != null &&
-              !hasGeneratedSummary)
+          if (patient != null) ...[
             const SizedBox(height: 16),
-          if (isGeneratingSummary) const AiGenerationCard(),
-          if (isGeneratingSummary) const SizedBox(height: 16),
-          if (hasGeneratedSummary)
-            AiSummaryCard(
-              soapNote: generatedSoapNote!,
-              transcript: generatedTranscript,
-            ),
-          if (hasGeneratedSummary) const SizedBox(height: 16),
-          if (hasGeneratedSummary)
-            ConsultationOutputStatus(
+            RecordingPanel(
+              isRecording: isRecording,
+              duration: recordingDuration,
               audioPath: recordingPath,
-              audioDuration: recordingDuration,
-              pdfPath: generatedPdfPath,
-              pdfGenerationDuration: pdfGenerationDuration,
+              onToggle: _toggleRecording,
             ),
-          if (hasGeneratedSummary) const SizedBox(height: 16),
-          if (hasGeneratedSummary)
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: isSaving ? null : _saveConsultation,
-                    icon: isSaving
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.save_outlined),
-                    label: Text(isSaving ? 'Guardando...' : 'Guardar consulta'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: isGeneratingPdf ? null : _generatePdf,
-                    icon: isGeneratingPdf
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.picture_as_pdf_outlined),
-                    label: Text(
-                      isGeneratingPdf ? 'Generando...' : 'Generar PDF',
+            const SizedBox(height: 16),
+            WorkflowStatus(
+              hasAudio: recordingPath != null,
+              isGeneratingSummary: isGeneratingSummary,
+              hasSummary: hasGeneratedSummary,
+              hasPdf: generatedPdfPath != null,
+            ),
+            const SizedBox(height: 16),
+            if (!isGeneratingSummary &&
+                recordingPath != null &&
+                !hasGeneratedSummary)
+              OutlinedButton.icon(
+                onPressed: () => _generateSoapFromAudio(recordingPath!),
+                icon: const Icon(Icons.auto_awesome_outlined),
+                label: const Text('Generar SOAP'),
+              ),
+            if (!isGeneratingSummary &&
+                recordingPath != null &&
+                !hasGeneratedSummary)
+              const SizedBox(height: 16),
+            if (isGeneratingSummary) const AiGenerationCard(),
+            if (isGeneratingSummary) const SizedBox(height: 16),
+            if (hasGeneratedSummary)
+              AiSummaryCard(
+                soapNote: generatedSoapNote!,
+                transcript: generatedTranscript,
+                showAiUsage: widget.apiClient.isAdmin,
+              ),
+            if (hasGeneratedSummary) const SizedBox(height: 16),
+            if (hasGeneratedSummary)
+              ConsultationOutputStatus(
+                audioPath: recordingPath,
+                audioDuration: recordingDuration,
+                pdfPath: generatedPdfPath,
+                pdfGenerationDuration: pdfGenerationDuration,
+              ),
+            if (hasGeneratedSummary) const SizedBox(height: 16),
+            if (hasGeneratedSummary)
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: isSaving ? null : _saveConsultation,
+                      icon: isSaving
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.save_outlined),
+                      label: Text(
+                        isSaving ? 'Guardando...' : 'Guardar consulta',
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: isGeneratingPdf ? null : _generatePdf,
+                      icon: isGeneratingPdf
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.picture_as_pdf_outlined),
+                      label: Text(
+                        isGeneratingPdf ? 'Generando...' : 'Generar PDF',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+          ],
         ],
       ),
     );
@@ -1425,7 +1537,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
         children: [
-          const SearchBox(label: 'Buscar por nombre, DNI o telefono'),
+          const SearchBox(label: 'Buscar por nombre o DNI'),
           const SizedBox(height: 16),
           FutureBuilder<List<Patient>>(
             future: patientsFuture,
@@ -1527,19 +1639,21 @@ class _HistoryScreenState extends State<HistoryScreen> {
     return AppScaffold(
       title: 'Consultas y PDF',
       subtitle: 'Resumenes generados por IA',
-      actions: [
-        IconButton(
-          tooltip: 'Exportar costos CSV',
-          onPressed: isExportingCosts ? null : _exportCostsCsv,
-          icon: isExportingCosts
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.table_view_outlined),
-        ),
-      ],
+      actions: widget.apiClient.isAdmin
+          ? [
+              IconButton(
+                tooltip: 'Exportar costos CSV',
+                onPressed: isExportingCosts ? null : _exportCostsCsv,
+                icon: isExportingCosts
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.table_view_outlined),
+              ),
+            ]
+          : null,
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
         children: [
@@ -1595,8 +1709,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
 }
 
 class AccountScreen extends StatelessWidget {
-  const AccountScreen({super.key, this.session});
+  const AccountScreen({super.key, required this.apiClient, this.session});
 
+  final ApiClient apiClient;
   final ApiSession? session;
 
   @override
@@ -1664,7 +1779,10 @@ class AccountScreen extends StatelessWidget {
           ),
           const SizedBox(height: 20),
           OutlinedButton.icon(
-            onPressed: () {
+            onPressed: () async {
+              await apiClient.logout();
+              if (!context.mounted) return;
+
               Navigator.of(context).pushAndRemoveUntil(
                 MaterialPageRoute(builder: (_) => const LoginScreen()),
                 (_) => false,
@@ -1822,7 +1940,7 @@ class PatientSelector extends StatelessWidget {
     required this.onSelected,
   });
 
-  final Patient selectedPatient;
+  final Patient? selectedPatient;
   final ApiClient apiClient;
   final ValueChanged<Patient> onSelected;
 
@@ -1844,54 +1962,68 @@ class PatientSelector extends StatelessWidget {
                   ? apiClient.fetchPatients()
                   : Future.value(mockPatients),
               builder: (context, snapshot) {
-                final patients = snapshot.data ?? mockPatients;
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(12),
+                      child: CircularProgressIndicator(),
+                    ),
+                  );
+                }
+
+                if (snapshot.hasError) {
+                  return ErrorCard(message: snapshot.error.toString());
+                }
+
+                final patients = snapshot.data ?? const <Patient>[];
+                if (patients.isEmpty) {
+                  return Text(
+                    'Agrega un paciente para iniciar una consulta.',
+                    style: TextStyle(
+                      color: Colors.grey.shade700,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  );
+                }
+
+                final selected = selectedPatient;
                 final value =
-                    patients.any((item) => item.id == selectedPatient.id)
-                    ? patients.firstWhere(
-                        (item) => item.id == selectedPatient.id,
-                      )
+                    selected != null &&
+                        patients.any((item) => item.id == selected.id)
+                    ? patients.firstWhere((item) => item.id == selected.id)
                     : patients.first;
-                if (!_samePatient(value, selectedPatient)) {
+                if (selected == null || !_samePatient(value, selected)) {
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     onSelected(value);
                   });
                 }
 
-                return DropdownButtonFormField<Patient>(
-                  initialValue: value,
-                  decoration: const InputDecoration(
-                    labelText: 'Seleccionar paciente',
-                    prefixIcon: Icon(Icons.person_search_outlined),
-                  ),
-                  items: patients
-                      .map(
-                        (patient) => DropdownMenuItem(
-                          value: patient,
-                          child: Text(patient.name),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (patient) {
-                    if (patient != null) onSelected(patient);
-                  },
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    DropdownButtonFormField<Patient>(
+                      initialValue: value,
+                      decoration: const InputDecoration(
+                        labelText: 'Seleccionar paciente',
+                        prefixIcon: Icon(Icons.person_search_outlined),
+                      ),
+                      items: patients
+                          .map(
+                            (patient) => DropdownMenuItem(
+                              value: patient,
+                              child: Text(patient.name),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (patient) {
+                        if (patient != null) onSelected(patient);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    InfoPill(icon: Icons.badge_outlined, text: value.dni),
+                  ],
                 );
               },
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: InfoPill(
-                    icon: Icons.badge_outlined,
-                    text: selectedPatient.dni,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                InfoPill(
-                  icon: Icons.bloodtype_outlined,
-                  text: selectedPatient.bloodType,
-                ),
-              ],
             ),
           ],
         ),
@@ -2127,9 +2259,15 @@ class AiGenerationCard extends StatelessWidget {
 }
 
 class AiSummaryCard extends StatelessWidget {
-  const AiSummaryCard({super.key, required this.soapNote, this.transcript});
+  const AiSummaryCard({
+    super.key,
+    required this.soapNote,
+    required this.showAiUsage,
+    this.transcript,
+  });
 
   final SoapNote soapNote;
+  final bool showAiUsage;
   final String? transcript;
 
   @override
@@ -2165,9 +2303,10 @@ class AiSummaryCard extends StatelessWidget {
               const SizedBox(height: 8),
             SummaryBlock(title: 'Motivo', body: soapNote.reason),
             const SizedBox(height: 8),
-            if (soapNote.aiUsage.isNotEmpty)
+            if (showAiUsage && soapNote.aiUsage.isNotEmpty)
               AiUsagePills(aiUsage: soapNote.aiUsage),
-            if (soapNote.aiUsage.isNotEmpty) const SizedBox(height: 12),
+            if (showAiUsage && soapNote.aiUsage.isNotEmpty)
+              const SizedBox(height: 12),
             if (soapNote.vitalSigns.isNotEmpty)
               SummaryBlock(
                 title: 'Signos vitales',
@@ -2314,36 +2453,48 @@ class SoapPdfGenerator {
   }) async {
     final document = pw.Document();
     final generatedAt = DateTime.now();
+    final sections = _buildSections(soapNote);
 
     document.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(34),
+        margin: const pw.EdgeInsets.fromLTRB(34, 34, 34, 42),
         build: (context) {
           return [
             _header(generatedAt),
-            pw.SizedBox(height: 18),
+            pw.SizedBox(height: 16),
             _patientBox(patient, recordedAt, audioDuration, audioPath),
             pw.SizedBox(height: 18),
-            _section('Motivo de consulta', soapNote.reason),
-            if (soapNote.vitalSigns.isNotEmpty)
-              _section(
-                'Signos vitales',
-                _formatVitalSigns(soapNote.vitalSigns),
-              ),
-            _section('S - Subjetivo', soapNote.subjective),
-            _section('O - Objetivo', soapNote.objective),
-            _section('A - Evaluacion', soapNote.assessment),
-            _section('P - Plan', soapNote.plan),
-            _section('Resumen IA', soapNote.aiSummary),
+            ...sections.expand(_section),
           ];
         },
         footer: (context) {
-          return pw.Align(
-            alignment: pw.Alignment.centerRight,
-            child: pw.Text(
-              'Pagina ${context.pageNumber} de ${context.pagesCount}',
-              style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey600),
+          return pw.Container(
+            padding: const pw.EdgeInsets.only(top: 8),
+            decoration: pw.BoxDecoration(
+              border: pw.Border(
+                top: pw.BorderSide(color: PdfColor.fromHex('#E2E8E6')),
+              ),
+            ),
+            child: pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Text(
+                  'Sanare IA',
+                  style: pw.TextStyle(
+                    fontSize: 9,
+                    color: PdfColor.fromHex('#6B7280'),
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                ),
+                pw.Text(
+                  'Pagina ${context.pageNumber} de ${context.pagesCount}',
+                  style: pw.TextStyle(
+                    fontSize: 9,
+                    color: PdfColor.fromHex('#6B7280'),
+                  ),
+                ),
+              ],
             ),
           );
         },
@@ -2371,7 +2522,7 @@ class SoapPdfGenerator {
                 'Sanare IA',
                 style: pw.TextStyle(
                   color: PdfColors.white,
-                  fontSize: 24,
+                  fontSize: 23,
                   fontWeight: pw.FontWeight.bold,
                 ),
               ),
@@ -2399,8 +2550,9 @@ class SoapPdfGenerator {
   ) {
     return pw.Container(
       width: double.infinity,
-      padding: const pw.EdgeInsets.all(14),
+      padding: const pw.EdgeInsets.all(16),
       decoration: pw.BoxDecoration(
+        color: PdfColor.fromHex('#FFFFFF'),
         border: pw.Border.all(color: PdfColor.fromHex('#D8E1DF')),
         borderRadius: pw.BorderRadius.circular(8),
       ),
@@ -2408,8 +2560,12 @@ class SoapPdfGenerator {
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: [
           pw.Text(
-            'Paciente',
-            style: pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold),
+            'Datos del paciente',
+            style: pw.TextStyle(
+              fontSize: 15,
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColor.fromHex('#17212B'),
+            ),
           ),
           pw.SizedBox(height: 8),
           _metadataRow('Nombre', patient.name),
@@ -2437,37 +2593,158 @@ class SoapPdfGenerator {
             width: 120,
             child: pw.Text(
               label,
-              style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+              style: pw.TextStyle(
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColor.fromHex('#17212B'),
+              ),
             ),
           ),
-          pw.Expanded(child: pw.Text(value)),
+          pw.Expanded(
+            child: pw.Text(
+              value,
+              style: pw.TextStyle(color: PdfColor.fromHex('#1F2937')),
+            ),
+          ),
         ],
       ),
     );
   }
 
-  static pw.Widget _section(String title, String body) {
-    return pw.Container(
-      width: double.infinity,
-      margin: const pw.EdgeInsets.only(bottom: 12),
-      padding: const pw.EdgeInsets.all(14),
-      decoration: pw.BoxDecoration(
-        color: PdfColor.fromHex('#F6F8F7'),
-        borderRadius: pw.BorderRadius.circular(8),
+  static List<_PdfSection> _buildSections(SoapNote soapNote) {
+    return [
+          _PdfSection('01', 'Motivo de consulta', soapNote.reason),
+          if (soapNote.vitalSigns.isNotEmpty)
+            _PdfSection(
+              '02',
+              'Signos vitales',
+              _formatVitalSigns(soapNote.vitalSigns),
+            ),
+          _PdfSection('S', 'Subjetivo', soapNote.subjective),
+          _PdfSection('O', 'Objetivo', soapNote.objective),
+          _PdfSection('A', 'Evaluacion', soapNote.assessment),
+          _PdfSection('P', 'Plan', soapNote.plan),
+          _PdfSection('IA', 'Resumen IA', soapNote.aiSummary),
+        ]
+        .where((section) => _isSpecifiedText(section.body))
+        .toList(growable: false);
+  }
+
+  static List<pw.Widget> _section(_PdfSection section) {
+    return [
+      pw.NewPage(freeSpace: 120),
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: pw.BoxDecoration(
+          color: PdfColor.fromHex('#EAF7F5'),
+          borderRadius: pw.BorderRadius.circular(6),
+        ),
+        child: pw.Row(
+          children: [
+            pw.Container(
+              width: 28,
+              height: 22,
+              alignment: pw.Alignment.center,
+              decoration: pw.BoxDecoration(
+                color: PdfColor.fromHex('#0A7F78'),
+                borderRadius: pw.BorderRadius.circular(4),
+              ),
+              child: pw.Text(
+                section.marker,
+                style: pw.TextStyle(
+                  color: PdfColors.white,
+                  fontSize: 9,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+            ),
+            pw.SizedBox(width: 9),
+            pw.Text(
+              section.title,
+              style: pw.TextStyle(
+                fontSize: 14,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColor.fromHex('#17212B'),
+              ),
+            ),
+          ],
+        ),
       ),
-      child: pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: [
-          pw.Text(
-            title,
-            style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
-          ),
-          pw.SizedBox(height: 6),
-          pw.Text(body, style: const pw.TextStyle(fontSize: 11, height: 1.35)),
-        ],
-      ),
+      pw.SizedBox(height: 8),
+      ..._body(section.body),
+      pw.SizedBox(height: 14),
+    ];
+  }
+
+  static List<pw.Widget> _body(String body) {
+    final lines = body
+        .replaceAll('\r\n', '\n')
+        .split('\n')
+        .map((line) => line.trim())
+        .toList(growable: false);
+
+    return lines
+        .expand((line) {
+          if (line.isEmpty) {
+            return <pw.Widget>[pw.SizedBox(height: 5)];
+          }
+
+          if (line.startsWith('- ')) {
+            return <pw.Widget>[
+              pw.Bullet(
+                text: line.substring(2).trim(),
+                bulletColor: PdfColor.fromHex('#0A7F78'),
+                style: _bodyTextStyle(),
+                margin: const pw.EdgeInsets.only(bottom: 4),
+              ),
+            ];
+          }
+
+          final separator = line.indexOf(':');
+          if (separator > 0 && separator < 35) {
+            final label = line.substring(0, separator + 1);
+            final value = line.substring(separator + 1).trimLeft();
+
+            return <pw.Widget>[
+              pw.RichText(
+                text: pw.TextSpan(
+                  children: [
+                    pw.TextSpan(
+                      text: '$label ',
+                      style: _bodyTextStyle(fontWeight: pw.FontWeight.bold),
+                    ),
+                    pw.TextSpan(text: value, style: _bodyTextStyle()),
+                  ],
+                ),
+              ),
+              pw.SizedBox(height: 4),
+            ];
+          }
+
+          return <pw.Widget>[
+            pw.Text(line, style: _bodyTextStyle()),
+            pw.SizedBox(height: 4),
+          ];
+        })
+        .toList(growable: false);
+  }
+
+  static pw.TextStyle _bodyTextStyle({pw.FontWeight? fontWeight}) {
+    return pw.TextStyle(
+      fontSize: 10.8,
+      height: 1.32,
+      color: PdfColor.fromHex('#111827'),
+      fontWeight: fontWeight,
     );
   }
+}
+
+class _PdfSection {
+  const _PdfSection(this.marker, this.title, this.body);
+
+  final String marker;
+  final String title;
+  final String body;
 }
 
 class ConsultationPdfCard extends StatelessWidget {
@@ -2771,7 +3048,7 @@ class PatientTile extends StatelessWidget {
             patient.name,
             style: const TextStyle(fontWeight: FontWeight.w800),
           ),
-          subtitle: Text('${patient.dni} - ${patient.phone}'),
+          subtitle: Text(patient.dni),
           trailing: const Icon(Icons.chevron_right),
         ),
       ),
@@ -2820,7 +3097,6 @@ class PatientSummary extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(patient.dni),
-                      Text(patient.phone),
                     ],
                   ),
                 ),
@@ -2831,10 +3107,6 @@ class PatientSummary extends StatelessWidget {
               spacing: 10,
               runSpacing: 10,
               children: [
-                InfoPill(
-                  icon: Icons.bloodtype_outlined,
-                  text: patient.bloodType,
-                ),
                 InfoPill(
                   icon: Icons.cake_outlined,
                   text: '${patient.age} anos',
@@ -2996,17 +3268,13 @@ class Patient {
     required this.id,
     required this.name,
     required this.dni,
-    required this.phone,
     required this.age,
-    required this.bloodType,
   });
 
   final int id;
   final String name;
   final String dni;
-  final String phone;
   final int age;
-  final String bloodType;
 
   factory Patient.fromJson(Map<String, dynamic> json) {
     final firstName = json['first_name']?.toString() ?? '';
@@ -3021,9 +3289,7 @@ class Patient {
       id: (json['id'] as num?)?.toInt() ?? 0,
       name: name.isNotEmpty ? name : legacyName ?? 'Paciente sin nombre',
       dni: json['dni']?.toString() ?? 'Sin DNI',
-      phone: json['telefono']?.toString() ?? 'Sin telefono',
       age: _ageFromDate(json['fecha_nacimiento']?.toString()),
-      bloodType: json['grupo_sanguineo']?.toString() ?? 'No especificado',
     );
   }
 
@@ -3040,38 +3306,10 @@ class Patient {
 }
 
 const mockPatients = [
-  Patient(
-    id: 1,
-    name: 'Ana Lopez',
-    dni: '0801-1994-02341',
-    phone: '+504 9876-1234',
-    age: 31,
-    bloodType: 'O+',
-  ),
-  Patient(
-    id: 2,
-    name: 'Carlos Mejia',
-    dni: '0801-1982-11245',
-    phone: '+504 9456-7788',
-    age: 44,
-    bloodType: 'A+',
-  ),
-  Patient(
-    id: 3,
-    name: 'Rosa Martinez',
-    dni: '0501-1976-88412',
-    phone: '+504 3321-9087',
-    age: 49,
-    bloodType: 'B-',
-  ),
-  Patient(
-    id: 4,
-    name: 'Luis Fernandez',
-    dni: '1101-2001-77122',
-    phone: '+504 8899-1020',
-    age: 25,
-    bloodType: 'AB+',
-  ),
+  Patient(id: 1, name: 'Ana Lopez', dni: '0801-1994-02341', age: 31),
+  Patient(id: 2, name: 'Carlos Mejia', dni: '0801-1982-11245', age: 44),
+  Patient(id: 3, name: 'Rosa Martinez', dni: '0501-1976-88412', age: 49),
+  Patient(id: 4, name: 'Luis Fernandez', dni: '1101-2001-77122', age: 25),
 ];
 
 class ConsultationRecord {
@@ -3217,13 +3455,19 @@ class ApiSession {
 }
 
 class ApiClient {
-  ApiClient();
+  ApiClient({FlutterSecureStorage? secureStorage})
+    : secureStorage = secureStorage ?? const FlutterSecureStorage();
 
   static const String baseUrl = String.fromEnvironment(
     'SANARE_API_URL',
     defaultValue: 'http://127.0.0.1:8000/api',
   );
+  static const String _sessionTokenKey = 'sanare.session.token';
+  static const String _sessionNameKey = 'sanare.session.doctor_name';
+  static const String _sessionEmailKey = 'sanare.session.doctor_email';
+  static const String _sessionRolesKey = 'sanare.session.roles';
 
+  final FlutterSecureStorage secureStorage;
   String? _token;
   bool _isAdmin = false;
 
@@ -3255,7 +3499,9 @@ class ApiClient {
       'device_name': 'sanare_mobile',
     });
 
-    return _sessionFromAuthData(data, fallbackEmail: email);
+    final session = _sessionFromAuthData(data, fallbackEmail: email);
+    await _persistSession(session);
+    return session;
   }
 
   Future<ApiSession> registerDoctor({
@@ -3272,7 +3518,51 @@ class ApiClient {
       'device_name': 'sanare_mobile',
     });
 
-    return _sessionFromAuthData(data, fallbackEmail: email);
+    final session = _sessionFromAuthData(data, fallbackEmail: email);
+    await _persistSession(session);
+    return session;
+  }
+
+  Future<ApiSession?> restoreSession() async {
+    final token = await secureStorage.read(key: _sessionTokenKey);
+    if (token == null || token.isEmpty) return null;
+
+    _token = token;
+
+    try {
+      final data = await _get('/me');
+      final session = _sessionFromProfileData(data, token: token);
+      await _persistSession(session);
+      return session;
+    } catch (_) {
+      await clearSession();
+      return null;
+    }
+  }
+
+  Future<void> logout() async {
+    try {
+      if (_token != null) {
+        await http.post(
+          Uri.parse('$baseUrl/doctors/logout'),
+          headers: _headers,
+        );
+      }
+    } finally {
+      await clearSession();
+    }
+  }
+
+  Future<void> clearSession() async {
+    _token = null;
+    _isAdmin = false;
+
+    await Future.wait([
+      secureStorage.delete(key: _sessionTokenKey),
+      secureStorage.delete(key: _sessionNameKey),
+      secureStorage.delete(key: _sessionEmailKey),
+      secureStorage.delete(key: _sessionRolesKey),
+    ]);
   }
 
   ApiSession _sessionFromAuthData(
@@ -3304,6 +3594,42 @@ class ApiClient {
       doctorEmail: user['email']?.toString() ?? fallbackEmail,
       roles: roles,
     );
+  }
+
+  ApiSession _sessionFromProfileData(
+    Map<String, dynamic> data, {
+    required String token,
+  }) {
+    final user = data['doctor'] is Map<String, dynamic>
+        ? data['doctor'] as Map<String, dynamic>
+        : data['user'] is Map<String, dynamic>
+        ? data['user'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    final roles = data['roles'] is List
+        ? (data['roles'] as List).map((role) => role.toString()).toList()
+        : <String>[];
+
+    _token = token;
+    _isAdmin = roles.contains('admin');
+
+    return ApiSession(
+      token: token,
+      doctorName: user['name']?.toString() ?? 'Medico',
+      doctorEmail: user['email']?.toString() ?? '',
+      roles: roles,
+    );
+  }
+
+  Future<void> _persistSession(ApiSession session) async {
+    await Future.wait([
+      secureStorage.write(key: _sessionTokenKey, value: session.token),
+      secureStorage.write(key: _sessionNameKey, value: session.doctorName),
+      secureStorage.write(key: _sessionEmailKey, value: session.doctorEmail),
+      secureStorage.write(
+        key: _sessionRolesKey,
+        value: jsonEncode(session.roles),
+      ),
+    ]);
   }
 
   Future<List<Patient>> fetchPatients() async {
@@ -3350,6 +3676,10 @@ class ApiClient {
   }
 
   Future<String> exportConsultationCostsCsv() async {
+    if (!_isAdmin) {
+      throw Exception('Solo el administrador puede exportar costos.');
+    }
+
     final response = await http.get(
       Uri.parse('$baseUrl/consultations/costs/export'),
       headers: {
