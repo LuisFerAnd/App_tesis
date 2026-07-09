@@ -1779,6 +1779,10 @@ class AccountScreen extends StatelessWidget {
           ),
           const SizedBox(height: 20),
           OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+              side: BorderSide(color: Theme.of(context).colorScheme.error),
+            ),
             onPressed: () async {
               await apiClient.logout();
               if (!context.mounted) return;
@@ -3256,7 +3260,6 @@ class SettingsTile extends StatelessWidget {
             style: const TextStyle(fontWeight: FontWeight.w800),
           ),
           subtitle: Text(value),
-          trailing: const Icon(Icons.chevron_right),
         ),
       ),
     );
