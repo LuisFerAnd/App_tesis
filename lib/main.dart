@@ -12,6 +12,8 @@ import 'package:record/record.dart';
 
 import 'platform_files.dart';
 
+part 'soap_evaluation.dart';
+
 void main() {
   runApp(const SanareMobileApp());
 }
@@ -476,6 +478,7 @@ class DoctorRegisterScreen extends StatefulWidget {
 class _DoctorRegisterScreenState extends State<DoctorRegisterScreen> {
   final formKey = GlobalKey<FormState>();
   final nameController = TextEditingController();
+  final specializationController = TextEditingController();
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
   final passwordConfirmationController = TextEditingController();
@@ -485,6 +488,7 @@ class _DoctorRegisterScreenState extends State<DoctorRegisterScreen> {
   @override
   void dispose() {
     nameController.dispose();
+    specializationController.dispose();
     emailController.dispose();
     passwordController.dispose();
     passwordConfirmationController.dispose();
@@ -500,6 +504,7 @@ class _DoctorRegisterScreenState extends State<DoctorRegisterScreen> {
     try {
       final session = await apiClient.registerDoctor(
         name: nameController.text.trim(),
+        specialization: specializationController.text.trim(),
         email: emailController.text.trim(),
         password: passwordController.text,
         passwordConfirmation: passwordConfirmationController.text,
@@ -569,6 +574,21 @@ class _DoctorRegisterScreenState extends State<DoctorRegisterScreen> {
                             validator: (value) {
                               if ((value ?? '').trim().isEmpty) {
                                 return 'Ingresa el nombre.';
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 14),
+                          TextFormField(
+                            controller: specializationController,
+                            textInputAction: TextInputAction.next,
+                            decoration: const InputDecoration(
+                              labelText: 'Especializacion',
+                              prefixIcon: Icon(Icons.medical_services_outlined),
+                            ),
+                            validator: (value) {
+                              if ((value ?? '').trim().isEmpty) {
+                                return 'Ingresa la especializacion.';
                               }
                               return null;
                             },
@@ -792,6 +812,8 @@ class _MobileShellState extends State<MobileShell> {
       PatientsScreen(apiClient: widget.apiClient),
       HistoryScreen(apiClient: widget.apiClient),
       AccountScreen(apiClient: widget.apiClient, session: widget.session),
+      if (widget.apiClient.isAdmin)
+        SoapEvaluationAdminScreen(apiClient: widget.apiClient),
     ];
 
     return Scaffold(
@@ -799,27 +821,33 @@ class _MobileShellState extends State<MobileShell> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
         onDestinationSelected: (value) => setState(() => index = value),
-        destinations: const [
-          NavigationDestination(
+        destinations: [
+          const NavigationDestination(
             icon: Icon(Icons.mic_none),
             selectedIcon: Icon(Icons.mic),
             label: 'Consulta',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.people_outline),
             selectedIcon: Icon(Icons.people),
             label: 'Pacientes',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.picture_as_pdf_outlined),
             selectedIcon: Icon(Icons.picture_as_pdf),
             label: 'PDF',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.person_outline),
             selectedIcon: Icon(Icons.person),
             label: 'Perfil',
           ),
+          if (widget.apiClient.isAdmin)
+            const NavigationDestination(
+              icon: Icon(Icons.fact_check_outlined),
+              selectedIcon: Icon(Icons.fact_check),
+              label: 'Evaluaciones',
+            ),
         ],
       ),
     );
@@ -868,6 +896,19 @@ class SoapNote {
       aiUsage: aiUsage,
     );
   }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'reason': reason,
+      'subjective': subjective,
+      'objective': objective,
+      'assessment': assessment,
+      'plan': plan,
+      'ai_summary': aiSummary,
+      'vital_signs': vitalSigns,
+      'ai_usage': aiUsage,
+    };
+  }
 }
 
 class SoapDraftResult {
@@ -903,22 +944,30 @@ class AiConsultationScreen extends StatefulWidget {
 
 class _AiConsultationScreenState extends State<AiConsultationScreen>
     with WidgetsBindingObserver {
+  static const String _draftKey = 'sanare.consultation.autosave';
+
   late final AudioRecorder audioRecorder;
+  late final ValueNotifier<Duration> recordingCounter;
   Timer? recordingTimer;
-  DateTime? recordingStartedAt;
+  DateTime? consultationStartedAt;
+  DateTime? recordingActiveStartedAt;
   DateTime? recordingSavedAt;
   Patient? selectedPatient;
   bool isRecording = false;
+  bool isRecordingPaused = false;
   bool isGeneratingSummary = false;
   bool isSaving = false;
   bool isGeneratingPdf = false;
   bool recordingInterruptedBySystem = false;
+  bool isConsultationSaved = false;
   Duration recordingDuration = Duration.zero;
+  Duration accumulatedRecordingDuration = Duration.zero;
   Duration? pdfGenerationDuration;
   String? recordingPath;
   String? generatedPdfPath;
   String? generatedTranscript;
   SoapNote? generatedSoapNote;
+  int? savedConsultationId;
 
   bool get hasGeneratedSummary => generatedSoapNote != null;
 
@@ -927,28 +976,29 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     audioRecorder = AudioRecorder();
+    recordingCounter = ValueNotifier(Duration.zero);
     if (!widget.apiClient.isAuthenticated) {
       selectedPatient = mockPatients.first;
     }
+    unawaited(_restoreDraft());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     recordingTimer?.cancel();
+    recordingCounter.dispose();
     unawaited(audioRecorder.dispose());
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if ((state == AppLifecycleState.inactive ||
-            state == AppLifecycleState.paused) &&
-        isRecording) {
+    if (state == AppLifecycleState.inactive &&
+        isRecording &&
+        !isRecordingPaused) {
       recordingInterruptedBySystem = true;
-      unawaited(
-        _stopRecording(autoGenerateSoap: false, showSavedMessage: false),
-      );
+      unawaited(_pauseRecording(showMessage: false));
       return;
     }
 
@@ -959,11 +1009,98 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'La grabacion se pauso por una interrupcion. Puedes generar el SOAP con el audio guardado o iniciar otra grabacion.',
+            'La grabacion se pauso por una interrupcion. Toca Continuar grabacion para seguir.',
           ),
         ),
       );
     }
+  }
+
+  Future<void> _restoreDraft() async {
+    final raw = await widget.apiClient.secureStorage.read(key: _draftKey);
+    if (raw == null || raw.isEmpty) return;
+
+    try {
+      final data = jsonDecode(raw);
+      if (data is! Map<String, dynamic>) return;
+
+      final patientJson = data['selected_patient'];
+      final soapJson = data['soap_note'];
+
+      if (!mounted) return;
+      setState(() {
+        selectedPatient = patientJson is Map<String, dynamic>
+            ? Patient.fromJson(patientJson)
+            : selectedPatient;
+        recordingDuration = Duration(
+          seconds: _intOrZero(data['audio_duration_seconds']),
+        );
+        accumulatedRecordingDuration = recordingDuration;
+        recordingPath = _nullableText(data['audio_path']);
+        consultationStartedAt = DateTime.tryParse(
+          data['consultation_started_at']?.toString() ?? '',
+        )?.toLocal();
+        recordingSavedAt = DateTime.tryParse(
+          data['recording_saved_at']?.toString() ?? '',
+        )?.toLocal();
+        generatedPdfPath = _nullableText(data['pdf_path']);
+        generatedTranscript = _nullableText(data['transcript']);
+        generatedSoapNote = soapJson is Map<String, dynamic>
+            ? SoapNote.fromDraftJson(
+                soapJson,
+                aiUsage: _mapFromJson(soapJson['ai_usage']),
+              )
+            : null;
+        pdfGenerationDuration = data['pdf_generation_ms'] is num
+            ? Duration(milliseconds: (data['pdf_generation_ms'] as num).toInt())
+            : null;
+        savedConsultationId = (data['saved_consultation_id'] as num?)?.toInt();
+        isConsultationSaved = data['is_saved'] == true;
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Consulta recuperada automaticamente.')),
+      );
+    } catch (_) {
+      await _clearDraft();
+    }
+  }
+
+  Future<void> _persistDraft() async {
+    final hasDraft =
+        selectedPatient != null ||
+        recordingPath != null ||
+        generatedSoapNote != null ||
+        generatedTranscript != null ||
+        generatedPdfPath != null;
+    if (!hasDraft) {
+      await _clearDraft();
+      return;
+    }
+
+    final data = <String, dynamic>{
+      'selected_patient': selectedPatient?.toJson(),
+      'audio_path': recordingPath,
+      'audio_duration_seconds': recordingDuration.inSeconds,
+      'consultation_started_at': consultationStartedAt?.toIso8601String(),
+      'recording_saved_at': recordingSavedAt?.toIso8601String(),
+      'transcript': generatedTranscript,
+      'soap_note': generatedSoapNote?.toJson(),
+      'pdf_path': generatedPdfPath,
+      'pdf_generation_ms': pdfGenerationDuration?.inMilliseconds,
+      'saved_consultation_id': savedConsultationId,
+      'is_saved': isConsultationSaved,
+    };
+
+    await widget.apiClient.secureStorage.write(
+      key: _draftKey,
+      value: jsonEncode(data),
+    );
+  }
+
+  Future<void> _clearDraft() {
+    return widget.apiClient.secureStorage.delete(key: _draftKey);
   }
 
   Future<void> _startRecording() async {
@@ -987,8 +1124,8 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       await audioRecorder.start(
         const RecordConfig(
           encoder: AudioEncoder.aacLc,
-          bitRate: 96000,
-          sampleRate: 44100,
+          bitRate: 48000,
+          sampleRate: 16000,
           numChannels: 1,
         ),
         path: path,
@@ -997,16 +1134,23 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       if (!mounted) return;
       setState(() {
         isRecording = true;
+        isRecordingPaused = false;
         isGeneratingSummary = false;
-        recordingStartedAt = startedAt;
+        isConsultationSaved = false;
+        savedConsultationId = null;
+        consultationStartedAt = startedAt;
+        recordingActiveStartedAt = startedAt;
         recordingSavedAt = null;
         recordingDuration = Duration.zero;
-        recordingPath = null;
+        accumulatedRecordingDuration = Duration.zero;
+        recordingPath = path;
         generatedPdfPath = null;
         pdfGenerationDuration = null;
         generatedTranscript = null;
         generatedSoapNote = null;
       });
+      recordingCounter.value = Duration.zero;
+      unawaited(_persistDraft());
       _startRecordingTimer();
     } catch (error) {
       if (!mounted) return;
@@ -1021,24 +1165,25 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     bool showSavedMessage = true,
   }) async {
     try {
+      final duration = _currentRecordingDuration();
       final stoppedPath = await audioRecorder.stop();
       recordingTimer?.cancel();
 
-      final duration = recordingStartedAt == null
-          ? recordingDuration
-          : DateTime.now().difference(recordingStartedAt!);
-
       final savedPath = stoppedPath == null || stoppedPath.isEmpty
-          ? null
+          ? recordingPath
           : stoppedPath;
 
       if (!mounted) return;
       setState(() {
         isRecording = false;
+        isRecordingPaused = false;
         recordingDuration = duration;
+        accumulatedRecordingDuration = duration;
         recordingPath = savedPath;
         recordingSavedAt = DateTime.now();
       });
+      recordingCounter.value = Duration.zero;
+      unawaited(_persistDraft());
 
       if (showSavedMessage) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1055,7 +1200,11 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       }
     } catch (error) {
       if (!mounted) return;
-      setState(() => isRecording = false);
+      setState(() {
+        isRecording = false;
+        isRecordingPaused = false;
+      });
+      recordingCounter.value = Duration.zero;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('No se pudo detener la grabacion: $error')),
       );
@@ -1063,37 +1212,104 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   }
 
   Future<void> _toggleRecording() {
+    if (isRecordingPaused) return _resumeRecording();
     return isRecording ? _stopRecording() : _startRecording();
+  }
+
+  Future<void> _pauseRecording({bool showMessage = true}) async {
+    try {
+      await audioRecorder.pause();
+      recordingTimer?.cancel();
+      final duration = _currentRecordingDuration();
+
+      if (!mounted) return;
+      setState(() {
+        isRecordingPaused = true;
+        recordingDuration = duration;
+        accumulatedRecordingDuration = duration;
+        recordingActiveStartedAt = null;
+      });
+      recordingCounter.value = duration;
+      unawaited(_persistDraft());
+
+      if (showMessage) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Grabacion pausada.')));
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo pausar la grabacion: $error')),
+      );
+    }
+  }
+
+  Future<void> _resumeRecording() async {
+    try {
+      await audioRecorder.resume();
+
+      if (!mounted) return;
+      setState(() {
+        isRecording = true;
+        isRecordingPaused = false;
+        recordingActiveStartedAt = DateTime.now();
+      });
+      recordingCounter.value = accumulatedRecordingDuration;
+      unawaited(_persistDraft());
+      _startRecordingTimer();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo continuar la grabacion: $error')),
+      );
+    }
   }
 
   void _startRecordingTimer() {
     recordingTimer?.cancel();
     recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      final startedAt = recordingStartedAt;
-      if (!mounted || startedAt == null) return;
+      if (!mounted || isRecordingPaused) return;
 
-      setState(() {
-        recordingDuration = DateTime.now().difference(startedAt);
-      });
+      final duration = _currentRecordingDuration();
+      recordingDuration = duration;
+      recordingCounter.value = duration;
+      if (duration.inSeconds % 15 == 0) {
+        unawaited(_persistDraft());
+      }
     });
+  }
+
+  Duration _currentRecordingDuration() {
+    final activeStartedAt = recordingActiveStartedAt;
+    if (activeStartedAt == null) return accumulatedRecordingDuration;
+
+    return accumulatedRecordingDuration +
+        DateTime.now().difference(activeStartedAt);
   }
 
   Future<void> _newConsultation() async {
     if (isRecording) {
-      await _stopRecording();
+      await _stopRecording(autoGenerateSoap: false);
     }
 
     if (!mounted) return;
     setState(() {
       isGeneratingSummary = false;
       recordingDuration = Duration.zero;
+      accumulatedRecordingDuration = Duration.zero;
       recordingPath = null;
+      consultationStartedAt = null;
       recordingSavedAt = null;
       generatedPdfPath = null;
       pdfGenerationDuration = null;
       generatedTranscript = null;
       generatedSoapNote = null;
+      isConsultationSaved = false;
+      savedConsultationId = null;
     });
+    recordingCounter.value = Duration.zero;
+    await _clearDraft();
   }
 
   Future<void> _generateSoapFromAudio(String audioPath) async {
@@ -1126,6 +1342,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       generatedSoapNote = null;
     });
 
+    final generationWatch = Stopwatch()..start();
     try {
       final result = await widget.apiClient.generateConsultationDraftFromAudio(
         pacienteId: patient.id,
@@ -1134,10 +1351,26 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       );
 
       if (!mounted) return;
+      generationWatch.stop();
+      final timedSoap = SoapNote(
+        reason: result.soapNote.reason,
+        subjective: result.soapNote.subjective,
+        objective: result.soapNote.objective,
+        assessment: result.soapNote.assessment,
+        plan: result.soapNote.plan,
+        aiSummary: result.soapNote.aiSummary,
+        vitalSigns: {
+          ...result.soapNote.vitalSigns,
+          'ai_generation_seconds': '${generationWatch.elapsed.inSeconds}',
+        },
+        aiUsage: result.soapNote.aiUsage,
+      );
       setState(() {
         generatedTranscript = result.transcript;
-        generatedSoapNote = result.soapNote;
+        generatedSoapNote = timedSoap;
       });
+      unawaited(_persistDraft());
+      unawaited(_saveConsultation(showMessage: false, autoTriggered: true));
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('SOAP generado desde el audio.')),
@@ -1188,7 +1421,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
         soapNote: soapNote,
         audioDuration: recordingDuration,
         audioPath: recordingPath,
-        recordedAt: recordingSavedAt ?? DateTime.now(),
+        recordedAt: consultationStartedAt ?? recordingSavedAt ?? DateTime.now(),
       );
       final fileName =
           'sanare_soap_${_safeFilePart(patient.name)}_${_timestampForFile(DateTime.now())}.pdf';
@@ -1202,6 +1435,10 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
         generatedPdfPath = path;
         pdfGenerationDuration = generationDuration;
       });
+      unawaited(_persistDraft());
+      if (savedConsultationId != null) {
+        unawaited(_saveConsultation(showMessage: false, autoTriggered: true));
+      }
 
       if (path.isNotEmpty) {
         unawaited(OpenFilex.open(path));
@@ -1224,8 +1461,12 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     }
   }
 
-  Future<void> _saveConsultation() async {
+  Future<void> _saveConsultation({
+    bool showMessage = true,
+    bool autoTriggered = false,
+  }) async {
     if (!widget.apiClient.isAuthenticated) {
+      if (autoTriggered) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Inicia sesion para guardar la consulta en Sanare.'),
@@ -1237,12 +1478,14 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     final soapNote = generatedSoapNote;
     final patient = selectedPatient;
     if (soapNote == null) {
+      if (autoTriggered) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Genera el SOAP antes de guardar.')),
       );
       return;
     }
     if (patient == null) {
+      if (autoTriggered) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Agrega o selecciona un paciente antes de continuar.'),
@@ -1253,24 +1496,46 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
 
     setState(() => isSaving = true);
     try {
-      await widget.apiClient.createConsultation(
-        pacienteId: patient.id,
-        soapNote: soapNote,
-        audioDuration: recordingPath == null ? null : recordingDuration,
-        audioPath: recordingPath,
-        pdfPath: generatedPdfPath,
-        pdfGenerationDuration: pdfGenerationDuration,
-      );
+      final consultationId = savedConsultationId;
+      final savedId = consultationId == null
+          ? await widget.apiClient.createConsultation(
+              pacienteId: patient.id,
+              soapNote: soapNote,
+              audioDuration: recordingPath == null ? null : recordingDuration,
+              audioPath: recordingPath,
+              consultedAt: consultationStartedAt,
+              pdfPath: generatedPdfPath,
+              pdfGenerationDuration: pdfGenerationDuration,
+            )
+          : await widget.apiClient.updateConsultation(
+              consultationId: consultationId,
+              pacienteId: patient.id,
+              soapNote: soapNote,
+              audioDuration: recordingPath == null ? null : recordingDuration,
+              audioPath: recordingPath,
+              consultedAt: consultationStartedAt,
+              pdfPath: generatedPdfPath,
+              pdfGenerationDuration: pdfGenerationDuration,
+            );
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Consulta guardada en Sanare.')),
-      );
+      setState(() {
+        savedConsultationId = savedId;
+        isConsultationSaved = true;
+      });
+      unawaited(_persistDraft());
+      if (showMessage) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Consulta guardada en Sanare.')),
+        );
+      }
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('No se pudo guardar: $error')));
+      if (!autoTriggered) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('No se pudo guardar: $error')));
+      }
     } finally {
       if (mounted) setState(() => isSaving = false);
     }
@@ -1303,16 +1568,27 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
                 pdfGenerationDuration = null;
                 generatedTranscript = null;
                 generatedSoapNote = null;
+                isConsultationSaved = false;
+                savedConsultationId = null;
               });
+              unawaited(_persistDraft());
             },
           ),
           if (patient != null) ...[
             const SizedBox(height: 16),
-            RecordingPanel(
-              isRecording: isRecording,
-              duration: recordingDuration,
-              audioPath: recordingPath,
-              onToggle: _toggleRecording,
+            ValueListenableBuilder<Duration>(
+              valueListenable: recordingCounter,
+              builder: (context, counterDuration, _) => RecordingPanel(
+                isRecording: isRecording,
+                counterDuration: counterDuration,
+                audioDuration: recordingDuration,
+                audioPath: recordingPath,
+                isPaused: isRecordingPaused,
+                onToggle: _toggleRecording,
+                onPause: isRecording && !isRecordingPaused
+                    ? () => _pauseRecording()
+                    : null,
+              ),
             ),
             const SizedBox(height: 16),
             WorkflowStatus(
@@ -1365,7 +1641,11 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
                             )
                           : const Icon(Icons.save_outlined),
                       label: Text(
-                        isSaving ? 'Guardando...' : 'Guardar consulta',
+                        isSaving
+                            ? 'Guardando...'
+                            : isConsultationSaved
+                            ? 'Guardado'
+                            : 'Guardar consulta',
                       ),
                     ),
                   ),
@@ -1753,7 +2033,9 @@ class AccountScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 4),
                         Text(session?.doctorEmail ?? 'Medicina general'),
-                        const Text('Colegiacion: 28473'),
+                        Text(
+                          session?.doctorSpecialization ?? 'Medicina general',
+                        ),
                       ],
                     ),
                   ),
@@ -1924,6 +2206,16 @@ class _PatientDetailScreenState extends State<PatientDetailScreen> {
                         isDownloading:
                             generatingPdfConsultationId == consultation.id,
                         onDownloadPdf: () => _downloadPdf(consultation),
+                        onEvaluate: () => Navigator.of(context)
+                            .push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => SoapEvaluationScreen(
+                                  apiClient: widget.apiClient,
+                                  consultation: consultation,
+                                ),
+                              ),
+                            )
+                            .then((_) => _refreshConsultations()),
                       ),
                     )
                     .toList(),
@@ -2040,22 +2332,32 @@ class RecordingPanel extends StatelessWidget {
   const RecordingPanel({
     super.key,
     required this.isRecording,
-    required this.duration,
+    required this.isPaused,
+    required this.counterDuration,
+    required this.audioDuration,
     required this.audioPath,
     required this.onToggle,
+    this.onPause,
   });
 
   final bool isRecording;
-  final Duration duration;
+  final bool isPaused;
+  final Duration counterDuration;
+  final Duration audioDuration;
   final String? audioPath;
   final VoidCallback onToggle;
+  final VoidCallback? onPause;
 
   @override
   Widget build(BuildContext context) {
-    final color = isRecording
+    final color = isRecording && !isPaused
         ? const Color(0xFFD94A38)
         : Theme.of(context).colorScheme.primary;
-    final label = isRecording ? 'Detener grabacion' : 'Iniciar grabacion';
+    final label = isPaused
+        ? 'Continuar grabacion'
+        : isRecording
+        ? 'Detener grabacion'
+        : 'Iniciar grabacion';
     final hasAudio = audioPath != null;
 
     return Card(
@@ -2075,13 +2377,15 @@ class RecordingPanel extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               isRecording || hasAudio
-                  ? _formatDuration(duration)
+                  ? _formatDuration(counterDuration)
                   : 'Listo para grabar',
               style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900),
             ),
             const SizedBox(height: 6),
             Text(
-              isRecording
+              isPaused
+                  ? 'Grabacion pausada, lista para continuar'
+                  : isRecording
                   ? 'Escuchando la consulta medico-paciente'
                   : hasAudio
                   ? 'Audio guardado localmente en el dispositivo'
@@ -2098,7 +2402,7 @@ class RecordingPanel extends StatelessWidget {
                 children: [
                   InfoPill(
                     icon: Icons.timer_outlined,
-                    text: _formatDuration(duration),
+                    text: _formatDuration(audioDuration),
                   ),
                   const InfoPill(
                     icon: Icons.save_outlined,
@@ -2113,10 +2417,27 @@ class RecordingPanel extends StatelessWidget {
               child: FilledButton.icon(
                 style: FilledButton.styleFrom(backgroundColor: color),
                 onPressed: onToggle,
-                icon: Icon(isRecording ? Icons.stop : Icons.mic_none),
+                icon: Icon(
+                  isPaused
+                      ? Icons.play_arrow
+                      : isRecording
+                      ? Icons.stop
+                      : Icons.mic_none,
+                ),
                 label: Text(label),
               ),
             ),
+            if (onPause != null) const SizedBox(height: 10),
+            if (onPause != null)
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: OutlinedButton.icon(
+                  onPressed: onPause,
+                  icon: const Icon(Icons.pause),
+                  label: const Text('Pausar grabacion'),
+                ),
+              ),
           ],
         ),
       ),
@@ -2938,11 +3259,13 @@ class PatientConsultationCard extends StatelessWidget {
     required this.consultation,
     required this.isDownloading,
     required this.onDownloadPdf,
+    required this.onEvaluate,
   });
 
   final ConsultationRecord consultation;
   final bool isDownloading;
   final VoidCallback onDownloadPdf;
+  final VoidCallback onEvaluate;
 
   @override
   Widget build(BuildContext context) {
@@ -2970,7 +3293,8 @@ class PatientConsultationCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          consultation.title,
+                          consultation.evaluationCode ??
+                              'Consulta #${consultation.id}',
                           style: const TextStyle(
                             fontWeight: FontWeight.w900,
                             fontSize: 16,
@@ -2984,18 +3308,36 @@ class PatientConsultationCard extends StatelessWidget {
                       ],
                     ),
                   ),
-                  StatusBadge(text: consultation.status),
                 ],
               ),
-              const SizedBox(height: 12),
-              Text(
-                consultation.soapNote.aiSummary,
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  StatusBadge(text: consultation.status),
+                  StatusBadge(
+                    text:
+                        {
+                          'pending': 'Evaluación pendiente',
+                          'draft': 'Evaluación en borrador',
+                          'completed': 'Evaluación completada',
+                        }[consultation.evaluationStatus] ??
+                        consultation.evaluationStatus,
+                  ),
+                ],
               ),
               const SizedBox(height: 12),
               Row(
                 children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: onEvaluate,
+                      icon: const Icon(Icons.fact_check_outlined),
+                      label: const Text('Evaluar'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: isDownloading ? null : onDownloadPdf,
@@ -3006,9 +3348,7 @@ class PatientConsultationCard extends StatelessWidget {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.download_outlined),
-                      label: Text(
-                        isDownloading ? 'Preparando...' : 'Descargar PDF',
-                      ),
+                      label: Text(isDownloading ? 'Preparando...' : 'PDF'),
                     ),
                   ),
                 ],
@@ -3292,8 +3632,22 @@ class Patient {
       id: (json['id'] as num?)?.toInt() ?? 0,
       name: name.isNotEmpty ? name : legacyName ?? 'Paciente sin nombre',
       dni: json['dni']?.toString() ?? 'Sin DNI',
-      age: _ageFromDate(json['fecha_nacimiento']?.toString()),
+      age:
+          (json['age'] as num?)?.toInt() ??
+          _ageFromDate(json['fecha_nacimiento']?.toString()),
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    final parts = name.split(' ');
+    return {
+      'id': id,
+      'full_name': name,
+      'first_name': parts.isEmpty ? name : parts.first,
+      'last_name': parts.length > 1 ? parts.sublist(1).join(' ') : '',
+      'dni': dni,
+      'age': age,
+    };
   }
 
   String get initials {
@@ -3328,6 +3682,8 @@ class ConsultationRecord {
     this.audioPath,
     this.localPdfPath,
     this.pdfUrl,
+    this.evaluationStatus = 'pending',
+    this.evaluationCode,
   });
 
   final int id;
@@ -3341,6 +3697,8 @@ class ConsultationRecord {
   final String? audioPath;
   final String? localPdfPath;
   final String? pdfUrl;
+  final String evaluationStatus;
+  final String? evaluationCode;
 
   factory ConsultationRecord.fromJson(
     Map<String, dynamic> json, {
@@ -3361,7 +3719,8 @@ class ConsultationRecord {
     final assessment = _textOrUnspecified(json['assessment']);
     final rawDate =
         json['consulted_at']?.toString() ?? json['created_at']?.toString();
-    final consultedAt = DateTime.tryParse(rawDate ?? '') ?? DateTime.now();
+    final consultedAt =
+        DateTime.tryParse(rawDate ?? '')?.toLocal() ?? DateTime.now();
     final localPdfPath = _nullableText(vitalSigns['local_pdf_path']);
     final pdfUrl = _nullableText(json['pdf_url']);
     final audioSeconds = _intOrZero(vitalSigns['audio_duration_seconds']);
@@ -3391,6 +3750,13 @@ class ConsultationRecord {
       audioPath: _nullableText(vitalSigns['local_audio_path']),
       localPdfPath: localPdfPath,
       pdfUrl: pdfUrl,
+      evaluationStatus:
+          (json['soap_evaluation'] as Map<String, dynamic>?)?['status']
+              ?.toString() ??
+          'pending',
+      evaluationCode:
+          (json['soap_evaluation'] as Map<String, dynamic>?)?['test_code']
+              ?.toString(),
     );
   }
 }
@@ -3446,12 +3812,14 @@ class ApiSession {
     required this.token,
     required this.doctorName,
     required this.doctorEmail,
+    required this.doctorSpecialization,
     required this.roles,
   });
 
   final String token;
   final String doctorName;
   final String doctorEmail;
+  final String doctorSpecialization;
   final List<String> roles;
 
   bool get isAdmin => roles.contains('admin');
@@ -3463,11 +3831,13 @@ class ApiClient {
 
   static const String baseUrl = String.fromEnvironment(
     'SANARE_API_URL',
-    defaultValue: 'http://127.0.0.1:8000/api',
+    defaultValue: 'https://api.sanaresys.com/api',
   );
   static const String _sessionTokenKey = 'sanare.session.token';
   static const String _sessionNameKey = 'sanare.session.doctor_name';
   static const String _sessionEmailKey = 'sanare.session.doctor_email';
+  static const String _sessionSpecializationKey =
+      'sanare.session.doctor_specialization';
   static const String _sessionRolesKey = 'sanare.session.roles';
 
   final FlutterSecureStorage secureStorage;
@@ -3509,12 +3879,14 @@ class ApiClient {
 
   Future<ApiSession> registerDoctor({
     required String name,
+    required String specialization,
     required String email,
     required String password,
     required String passwordConfirmation,
   }) async {
     final data = await _post('/doctors/register', {
       'name': name,
+      'specialization': specialization,
       'email': email,
       'password': password,
       'password_confirmation': passwordConfirmation,
@@ -3564,6 +3936,7 @@ class ApiClient {
       secureStorage.delete(key: _sessionTokenKey),
       secureStorage.delete(key: _sessionNameKey),
       secureStorage.delete(key: _sessionEmailKey),
+      secureStorage.delete(key: _sessionSpecializationKey),
       secureStorage.delete(key: _sessionRolesKey),
     ]);
   }
@@ -3595,6 +3968,10 @@ class ApiClient {
       doctorName:
           medico['nombre']?.toString() ?? user['name']?.toString() ?? 'Medico',
       doctorEmail: user['email']?.toString() ?? fallbackEmail,
+      doctorSpecialization:
+          user['specialization']?.toString() ??
+          medico['especializacion']?.toString() ??
+          'Medicina general',
       roles: roles,
     );
   }
@@ -3619,6 +3996,8 @@ class ApiClient {
       token: token,
       doctorName: user['name']?.toString() ?? 'Medico',
       doctorEmail: user['email']?.toString() ?? '',
+      doctorSpecialization:
+          user['specialization']?.toString() ?? 'Medicina general',
       roles: roles,
     );
   }
@@ -3628,6 +4007,10 @@ class ApiClient {
       secureStorage.write(key: _sessionTokenKey, value: session.token),
       secureStorage.write(key: _sessionNameKey, value: session.doctorName),
       secureStorage.write(key: _sessionEmailKey, value: session.doctorEmail),
+      secureStorage.write(
+        key: _sessionSpecializationKey,
+        value: session.doctorSpecialization,
+      ),
       secureStorage.write(
         key: _sessionRolesKey,
         value: jsonEncode(session.roles),
@@ -3701,6 +4084,72 @@ class ApiClient {
     );
   }
 
+  Future<SoapEvaluation> fetchSoapEvaluation(int consultationId) async {
+    final data = await _get('/consultations/$consultationId/soap-evaluation');
+    return SoapEvaluation.fromJson(data['evaluation'] as Map<String, dynamic>);
+  }
+
+  Future<SoapEvaluation> saveSoapEvaluation(
+    SoapEvaluation evaluation, {
+    bool complete = false,
+  }) async {
+    final path =
+        '/soap-evaluations/${evaluation.id}${complete ? '/complete' : ''}';
+    final data = complete
+        ? await _post(path, evaluation.toPayload())
+        : await _put(path, evaluation.toPayload());
+    return SoapEvaluation.fromJson(data['evaluation'] as Map<String, dynamic>);
+  }
+
+  Future<List<SoapEvaluation>> fetchSoapEvaluations({
+    String query = '',
+    String? status,
+  }) async {
+    final params = <String, String>{
+      'per_page': '100',
+      if (query.trim().isNotEmpty) 'search': query.trim(),
+      'status': ?status,
+    };
+    final suffix = '?${Uri(queryParameters: params).query}';
+    final data = await _get('/admin/soap-evaluations$suffix');
+    return _itemsFrom(
+      data,
+      'evaluations',
+    ).whereType<Map<String, dynamic>>().map(SoapEvaluation.fromJson).toList();
+  }
+
+  Future<String> exportSoapEvaluations(
+    String format, {
+    String query = '',
+    String? status,
+    int? evaluationId,
+  }) async {
+    if (!_isAdmin) {
+      throw Exception('No tienes permiso para exportar evaluaciones.');
+    }
+    final params = <String, String>{
+      if (query.trim().isNotEmpty) 'search': query.trim(),
+      'status': ?status,
+      if (evaluationId != null) 'evaluation_id': '$evaluationId',
+    };
+    final response = await http.get(
+      Uri.parse(
+        '$baseUrl/admin/soap-evaluations/export/$format',
+      ).replace(queryParameters: params.isEmpty ? null : params),
+      headers: {
+        'Accept': 'application/octet-stream',
+        if (_token != null) 'Authorization': 'Bearer $_token',
+      },
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      _decode(response);
+    }
+    return saveExportBytes(
+      'evaluaciones_soap_${_timestampForFile(DateTime.now())}.$format',
+      response.bodyBytes,
+    );
+  }
+
   Future<Patient> createPatient({
     required String firstName,
     required String lastName,
@@ -3720,11 +4169,12 @@ class ApiClient {
     return Patient.fromJson(patient);
   }
 
-  Future<void> createConsultation({
+  Future<int> createConsultation({
     required int pacienteId,
     required SoapNote soapNote,
     Duration? audioDuration,
     String? audioPath,
+    DateTime? consultedAt,
     String? pdfPath,
     Duration? pdfGenerationDuration,
   }) async {
@@ -3748,15 +4198,72 @@ class ApiClient {
       vitalSigns['pdf_generation_ms'] = pdfGenerationDuration.inMilliseconds;
     }
 
-    await _post('/consultations', {
+    final data = await _post('/consultations', {
       'patient_id': pacienteId,
       'reason': soapNote.reason,
       'subjective': soapNote.subjective,
       'objective': soapNote.objective,
       'assessment': soapNote.assessment,
       'plan': soapNote.plan,
+      if (consultedAt != null) 'consulted_at': consultedAt.toIso8601String(),
       'vital_signs': vitalSigns,
     });
+
+    final consultation = data['consultation'];
+    if (consultation is Map<String, dynamic>) {
+      return (consultation['id'] as num?)?.toInt() ?? 0;
+    }
+
+    return 0;
+  }
+
+  Future<int> updateConsultation({
+    required int consultationId,
+    required int pacienteId,
+    required SoapNote soapNote,
+    Duration? audioDuration,
+    String? audioPath,
+    DateTime? consultedAt,
+    String? pdfPath,
+    Duration? pdfGenerationDuration,
+  }) async {
+    final vitalSigns = <String, dynamic>{
+      ...soapNote.vitalSigns,
+      'ai_summary': soapNote.aiSummary,
+    };
+    if (soapNote.aiUsage.isNotEmpty) {
+      vitalSigns['ai_usage'] = soapNote.aiUsage;
+    }
+    if (audioDuration != null) {
+      vitalSigns['audio_duration_seconds'] = audioDuration.inSeconds;
+    }
+    if (audioPath != null) {
+      vitalSigns['local_audio_path'] = audioPath;
+    }
+    if (pdfPath != null) {
+      vitalSigns['local_pdf_path'] = pdfPath;
+    }
+    if (pdfGenerationDuration != null) {
+      vitalSigns['pdf_generation_ms'] = pdfGenerationDuration.inMilliseconds;
+    }
+
+    final data = await _put('/consultations/$consultationId', {
+      'patient_id': pacienteId,
+      'reason': soapNote.reason,
+      'subjective': soapNote.subjective,
+      'objective': soapNote.objective,
+      'assessment': soapNote.assessment,
+      'plan': soapNote.plan,
+      if (consultedAt != null) 'consulted_at': consultedAt.toIso8601String(),
+      'vital_signs': vitalSigns,
+    });
+
+    final consultation = data['consultation'];
+    if (consultation is Map<String, dynamic>) {
+      return (consultation['id'] as num?)?.toInt() ?? consultationId;
+    }
+
+    return consultationId;
   }
 
   Future<SoapDraftResult> generateConsultationDraftFromAudio({
@@ -3804,6 +4311,18 @@ class ApiClient {
     final response = await http.get(
       Uri.parse('$baseUrl$path'),
       headers: _headers,
+    );
+    return _decode(response);
+  }
+
+  Future<Map<String, dynamic>> _put(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    final response = await http.put(
+      Uri.parse('$baseUrl$path'),
+      headers: _headers,
+      body: jsonEncode(body),
     );
     return _decode(response);
   }
@@ -3982,22 +4501,24 @@ String _formatGenerationTime(Duration duration) {
 }
 
 String _formatDateTime(DateTime value) {
-  final day = value.day.toString().padLeft(2, '0');
-  final month = value.month.toString().padLeft(2, '0');
-  final year = value.year.toString();
-  final hour = value.hour.toString().padLeft(2, '0');
-  final minute = value.minute.toString().padLeft(2, '0');
+  final localValue = value.toLocal();
+  final day = localValue.day.toString().padLeft(2, '0');
+  final month = localValue.month.toString().padLeft(2, '0');
+  final year = localValue.year.toString();
+  final hour = localValue.hour.toString().padLeft(2, '0');
+  final minute = localValue.minute.toString().padLeft(2, '0');
 
   return '$day/$month/$year $hour:$minute';
 }
 
 String _timestampForFile(DateTime value) {
-  final year = value.year.toString();
-  final month = value.month.toString().padLeft(2, '0');
-  final day = value.day.toString().padLeft(2, '0');
-  final hour = value.hour.toString().padLeft(2, '0');
-  final minute = value.minute.toString().padLeft(2, '0');
-  final second = value.second.toString().padLeft(2, '0');
+  final localValue = value.toLocal();
+  final year = localValue.year.toString();
+  final month = localValue.month.toString().padLeft(2, '0');
+  final day = localValue.day.toString().padLeft(2, '0');
+  final hour = localValue.hour.toString().padLeft(2, '0');
+  final minute = localValue.minute.toString().padLeft(2, '0');
+  final second = localValue.second.toString().padLeft(2, '0');
 
   return '$year$month${day}_$hour$minute$second';
 }

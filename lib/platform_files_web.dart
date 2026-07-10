@@ -15,6 +15,13 @@ Future<String> saveCsvBytes(String fileName, List<int> bytes) async {
   return _downloadBlob(fileName, blob);
 }
 
+Future<String> saveExportBytes(String fileName, List<int> bytes) async {
+  final blob = html.Blob([
+    Uint8List.fromList(bytes),
+  ], 'application/octet-stream');
+  return _downloadBlob(fileName, blob);
+}
+
 String _downloadBlob(String fileName, html.Blob blob) {
   final url = html.Url.createObjectUrlFromBlob(blob);
   final anchor = html.AnchorElement(href: url)
