@@ -844,7 +844,24 @@ class _SoapEvaluationAdminScreenState extends State<SoapEvaluationAdminScreen> {
         status: status,
         evaluationId: evaluationId,
       );
-      if (path.isNotEmpty) unawaited(OpenFilex.open(path));
+      if (!mounted) return;
+      if (path.isNotEmpty) {
+        if (format == 'sav') {
+          final box = context.findRenderObject() as RenderBox?;
+          await SharePlus.instance.share(
+            ShareParams(
+              files: [XFile(path, mimeType: 'application/x-spss-sav')],
+              title: 'Compartir evaluación SPSS',
+              subject: 'Evaluaciones SOAP en formato SPSS',
+              sharePositionOrigin: box == null
+                  ? null
+                  : box.localToGlobal(Offset.zero) & box.size,
+            ),
+          );
+        } else {
+          unawaited(OpenFilex.open(path));
+        }
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Exportación $format generada.')),
