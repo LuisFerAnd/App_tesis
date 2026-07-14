@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -41,5 +42,50 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Continuar en modo demo'), findsNothing);
+  });
+
+  testWidgets('patient summary only shows managed patient data', (
+    WidgetTester tester,
+  ) async {
+    final patient = Patient(
+      id: 1,
+      name: 'Paciente de prueba',
+      dni: '0801-1990-00001',
+      age: 36,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: PatientSummary(patient: patient)),
+      ),
+    );
+
+    expect(find.text(patient.name), findsOneWidget);
+    expect(find.text(patient.dni), findsOneWidget);
+    expect(find.text('36 anos'), findsNothing);
+    expect(find.text('Sin alertas'), findsNothing);
+    expect(find.byIcon(Icons.warning_amber_outlined), findsNothing);
+  });
+
+  testWidgets('audio upload problem offers cancel and retry actions', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AiGenerationCard(
+            message: 'No se pudo subir el audio',
+            isProcessing: false,
+            pendingSegments: 1,
+            onCancel: () {},
+            onRetry: () {},
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('Cancelar'), findsOneWidget);
+    expect(find.text('Reintentar'), findsOneWidget);
   });
 }

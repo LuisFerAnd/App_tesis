@@ -8,10 +8,14 @@ import 'package:http_parser/http_parser.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-import 'package:record/record.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:uuid/uuid.dart';
+import 'package:flutter/services.dart';
 
 import 'platform_files.dart';
+import 'recording/recording_service.dart';
+import 'recording/local_segment_store.dart';
+import 'recording/progressive_upload_service.dart';
 
 part 'soap_evaluation.dart';
 
@@ -947,73 +951,169 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     with WidgetsBindingObserver {
   static const String _draftKey = 'sanare.consultation.autosave';
 
-  late final AudioRecorder audioRecorder;
-  late final ValueNotifier<Duration> recordingCounter;
-  Timer? recordingTimer;
+  late final RecordingService recordingService;
+  late final ProgressiveUploadService uploadService;
+  Timer? processingPollTimer;
+  late final ValueNotifier<ProcessingSnapshot?> processingSnapshotNotifier;
+  String? processingSessionUuid;
   DateTime? consultationStartedAt;
-  DateTime? recordingActiveStartedAt;
   DateTime? recordingSavedAt;
   Patient? selectedPatient;
-  bool isRecording = false;
-  bool isRecordingPaused = false;
   bool isGeneratingSummary = false;
   bool isSaving = false;
   bool isGeneratingPdf = false;
-  bool recordingInterruptedBySystem = false;
   bool isConsultationSaved = false;
   Duration recordingDuration = Duration.zero;
-  Duration accumulatedRecordingDuration = Duration.zero;
   Duration? pdfGenerationDuration;
   String? recordingPath;
+  List<String> recordingPaths = <String>[];
   String? generatedPdfPath;
   String? generatedTranscript;
   SoapNote? generatedSoapNote;
   int? savedConsultationId;
+  RecordingStatus? _lastRecordingStatus;
+  bool? _lastRecordingControlsLocked;
+  int _lastRecordingSegmentCount = -1;
+  String? _lastRecordingPath;
 
   bool get hasGeneratedSummary => generatedSoapNote != null;
+  bool get isRecording =>
+      recordingService.status.hasActiveSession ||
+      (recordingService.status == RecordingStatus.error &&
+          recordingService.hasRecoverableSession);
+  bool get isRecordingPaused =>
+      recordingService.status == RecordingStatus.paused;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    audioRecorder = AudioRecorder();
-    recordingCounter = ValueNotifier(Duration.zero);
+    recordingService = RecordingService.instance;
+    uploadService = ProgressiveUploadService.instance;
+    processingSnapshotNotifier = ValueNotifier<ProcessingSnapshot?>(null);
+    uploadService.configure(widget.apiClient);
+    recordingService.onSegmentFinalized = (segment) =>
+        uploadService.registerSegment(
+          sessionUuid: segment.sessionUuid,
+          segmentNumber: segment.segmentNumber,
+          localPath: segment.path,
+          duration: segment.duration,
+          isFinal: segment.isFinal,
+        );
+    recordingService.addListener(_onRecordingStateChanged);
     if (!widget.apiClient.isAuthenticated) {
       selectedPatient = mockPatients.first;
     }
-    unawaited(_restoreDraft());
+    unawaited(_initializeScreen());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    recordingTimer?.cancel();
-    recordingCounter.dispose();
-    unawaited(audioRecorder.dispose());
+    recordingService.removeListener(_onRecordingStateChanged);
+    processingPollTimer?.cancel();
+    processingSnapshotNotifier.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive &&
-        isRecording &&
-        !isRecordingPaused) {
-      recordingInterruptedBySystem = true;
-      unawaited(_pauseRecording(showMessage: false));
-      return;
+    if (state == AppLifecycleState.resumed) {
+      unawaited(recordingService.syncRecordingState());
+      unawaited(uploadService.processPending());
+      final sessionUuid = recordingService.sessionId;
+      if (sessionUuid != null && isGeneratingSummary) {
+        unawaited(_pollProcessingStatus(sessionUuid));
+      }
     }
+  }
 
-    if (state == AppLifecycleState.resumed && recordingInterruptedBySystem) {
-      recordingInterruptedBySystem = false;
-      if (!mounted) return;
+  Future<void> _initializeScreen() async {
+    await uploadService.initialize();
+    final recovered = await recordingService.initialize();
+    await _restoreDraft();
+    _onRecordingStateChanged();
+    if (recovered && mounted) {
+      await _showRecoveredRecordingDialog();
+    } else {
+      await _resumePendingProcessing();
+    }
+  }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'La grabacion se pauso por una interrupcion. Toca Continuar grabacion para seguir.',
-          ),
+  Future<void> _resumePendingProcessing() async {
+    final sessions = await uploadService.recoverableSessions();
+    if (!mounted || sessions.isEmpty) return;
+    final pending = sessions.firstWhere(
+      (session) => session.recordingStatus == 'finished',
+      orElse: () => sessions.first,
+    );
+    if (pending.recordingStatus != 'finished') return;
+    setState(() => isGeneratingSummary = true);
+    _startProcessingPolling(pending.sessionUuid);
+  }
+
+  void _onRecordingStateChanged() {
+    if (!mounted) return;
+    final status = recordingService.status;
+    final controlsLocked = recordingService.controlsLocked;
+    final segments = recordingService.segments;
+    final primaryPath = recordingService.primaryPath;
+    final hasStructuralChange =
+        status != _lastRecordingStatus ||
+        controlsLocked != _lastRecordingControlsLocked ||
+        segments.length != _lastRecordingSegmentCount ||
+        primaryPath != _lastRecordingPath;
+    if (!hasStructuralChange) return;
+
+    _lastRecordingStatus = status;
+    _lastRecordingControlsLocked = controlsLocked;
+    _lastRecordingSegmentCount = segments.length;
+    _lastRecordingPath = primaryPath;
+    setState(() {
+      if (segments.isNotEmpty) {
+        recordingPaths = segments;
+        recordingPath = recordingPaths.first;
+      }
+      if (status != RecordingStatus.recording) {
+        recordingDuration = recordingService.duration;
+      }
+    });
+  }
+
+  Future<void> _showRecoveredRecordingDialog() async {
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Grabación incompleta recuperada'),
+        content: const Text(
+          'Se conservaron los fragmentos de una consulta anterior. '
+          'Puedes continuar en un nuevo fragmento, finalizarla o descartarla.',
         ),
-      );
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'discard'),
+            child: const Text('Descartar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'finish'),
+            child: const Text('Finalizar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, 'continue'),
+            child: const Text('Continuar'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'continue') {
+      final recovered = await recordingService.recoverRecording();
+      if (!recovered && mounted) _showRecordingError();
+    } else if (action == 'finish') {
+      await _stopRecording();
+    } else if (action == 'discard') {
+      await recordingService.discardRecoveredSession();
     }
   }
 
@@ -1036,8 +1136,14 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
         recordingDuration = Duration(
           seconds: _intOrZero(data['audio_duration_seconds']),
         );
-        accumulatedRecordingDuration = recordingDuration;
         recordingPath = _nullableText(data['audio_path']);
+        recordingPaths = (data['audio_segments'] as List<dynamic>? ?? const [])
+            .map((value) => value.toString())
+            .where((path) => path.isNotEmpty)
+            .toList();
+        if (recordingPaths.isEmpty && recordingPath != null) {
+          recordingPaths = <String>[recordingPath!];
+        }
         consultationStartedAt = DateTime.tryParse(
           data['consultation_started_at']?.toString() ?? '',
         )?.toLocal();
@@ -1083,6 +1189,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     final data = <String, dynamic>{
       'selected_patient': selectedPatient?.toJson(),
       'audio_path': recordingPath,
+      'audio_segments': recordingPaths,
       'audio_duration_seconds': recordingDuration.inSeconds,
       'consultation_started_at': consultationStartedAt?.toIso8601String(),
       'recording_saved_at': recordingSavedAt?.toIso8601String(),
@@ -1105,58 +1212,59 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   }
 
   Future<void> _startRecording() async {
-    try {
-      final hasPermission = await audioRecorder.hasPermission();
-      if (!hasPermission) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Permite el microfono para grabar la consulta.'),
-          ),
-        );
-        return;
-      }
-
-      final startedAt = DateTime.now();
-      final path = await createRecordingPath(
-        'sanare_audio_${_timestampForFile(startedAt)}.m4a',
+    final patient = selectedPatient;
+    if (patient == null || recordingService.controlsLocked) return;
+    final startedAt = DateTime.now();
+    final professionalId = await widget.apiClient.professionalIdentifier();
+    final sessionUuid = const Uuid().v4();
+    await uploadService.beginSession(
+      sessionUuid: sessionUuid,
+      patientId: patient.id,
+      startedAt: startedAt,
+    );
+    final registeredSession = await uploadService.session(sessionUuid);
+    final started = await recordingService.startRecording(
+      patientId: patient.id,
+      professionalId: professionalId,
+      sessionUuid: sessionUuid,
+      consultationCode:
+          registeredSession?.consultationCode ??
+          registeredSession?.localConsultationCode,
+    );
+    if (!mounted) return;
+    if (!started) {
+      await uploadService.recordFailure(
+        sessionUuid: sessionUuid,
+        stage: 'recording',
+        code: 'MICROPHONE_START_FAILED',
+        message: 'No se pudo iniciar la grabación.',
       );
-
-      await audioRecorder.start(
-        const RecordConfig(
-          encoder: AudioEncoder.aacLc,
-          bitRate: 48000,
-          sampleRate: 16000,
-          numChannels: 1,
-        ),
-        path: path,
-      );
-
-      if (!mounted) return;
-      setState(() {
-        isRecording = true;
-        isRecordingPaused = false;
-        isGeneratingSummary = false;
-        isConsultationSaved = false;
-        savedConsultationId = null;
-        consultationStartedAt = startedAt;
-        recordingActiveStartedAt = startedAt;
-        recordingSavedAt = null;
-        recordingDuration = Duration.zero;
-        accumulatedRecordingDuration = Duration.zero;
-        recordingPath = path;
-        generatedPdfPath = null;
-        pdfGenerationDuration = null;
-        generatedTranscript = null;
-        generatedSoapNote = null;
-      });
-      recordingCounter.value = Duration.zero;
-      unawaited(_persistDraft());
-      _startRecordingTimer();
-    } catch (error) {
-      if (!mounted) return;
+      _showRecordingError();
+      return;
+    }
+    setState(() {
+      isGeneratingSummary = false;
+      isConsultationSaved = false;
+      savedConsultationId = null;
+      consultationStartedAt = startedAt;
+      recordingSavedAt = null;
+      recordingDuration = Duration.zero;
+      recordingPaths = recordingService.segments;
+      recordingPath = recordingService.primaryPath;
+      generatedPdfPath = null;
+      pdfGenerationDuration = null;
+      generatedTranscript = null;
+      generatedSoapNote = null;
+    });
+    unawaited(_persistDraft());
+    if (!await recordingService.notificationsEnabled() && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo iniciar la grabacion: $error')),
+        const SnackBar(
+          content: Text(
+            'Las notificaciones están desactivadas. La grabación continúa, '
+            'pero conviene habilitarlas para ver el indicador persistente.',
+          ),
+        ),
       );
     }
   }
@@ -1165,128 +1273,167 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     bool autoGenerateSoap = true,
     bool showSavedMessage = true,
   }) async {
-    try {
-      final duration = _currentRecordingDuration();
-      final stoppedPath = await audioRecorder.stop();
-      recordingTimer?.cancel();
+    if (recordingService.controlsLocked) return;
+    final result = await recordingService.stopRecording();
+    if (!mounted || result == null) return;
+    setState(() {
+      recordingDuration = result.duration;
+      recordingPaths = result.paths;
+      recordingPath = result.paths.isEmpty ? null : result.paths.first;
+      recordingSavedAt = DateTime.now();
+    });
+    unawaited(_persistDraft());
 
-      final savedPath = stoppedPath == null || stoppedPath.isEmpty
-          ? recordingPath
-          : stoppedPath;
-
-      if (!mounted) return;
-      setState(() {
-        isRecording = false;
-        isRecordingPaused = false;
-        recordingDuration = duration;
-        accumulatedRecordingDuration = duration;
-        recordingPath = savedPath;
-        recordingSavedAt = DateTime.now();
-      });
-      recordingCounter.value = Duration.zero;
-      unawaited(_persistDraft());
-
-      if (showSavedMessage) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Grabacion guardada localmente (${_formatDuration(duration)}).',
-            ),
-          ),
-        );
-      }
-
-      if (savedPath != null && autoGenerateSoap) {
-        unawaited(_generateSoapFromAudio(savedPath));
-      }
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        isRecording = false;
-        isRecordingPaused = false;
-      });
-      recordingCounter.value = Duration.zero;
+    if (showSavedMessage) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo detener la grabacion: $error')),
+        SnackBar(
+          content: Text(
+            'Grabación guardada localmente '
+            '(${_formatDuration(result.duration)}, ${result.paths.length} fragmento(s)).',
+          ),
+        ),
+      );
+    }
+
+    if (result.paths.isNotEmpty) {
+      final sessionUuid = recordingService.sessionId;
+      if (sessionUuid != null) {
+        if (autoGenerateSoap) setState(() => isGeneratingSummary = true);
+        await uploadService.finishSession(
+          sessionUuid: sessionUuid,
+          expectedSegments: result.paths.length,
+        );
+        if (autoGenerateSoap) _startProcessingPolling(sessionUuid);
+      }
+    }
+  }
+
+  void _startProcessingPolling(String sessionUuid) {
+    processingSessionUuid = sessionUuid;
+    processingPollTimer?.cancel();
+    unawaited(_pollProcessingStatus(sessionUuid));
+    processingPollTimer = Timer.periodic(
+      const Duration(seconds: 4),
+      (_) => unawaited(_pollProcessingStatus(sessionUuid)),
+    );
+  }
+
+  Future<void> _pollProcessingStatus(String sessionUuid) async {
+    final snapshot = await uploadService.pollStatus(sessionUuid);
+    if (!mounted || snapshot == null) return;
+    processingSnapshotNotifier.value = snapshot;
+    if (!snapshot.isTerminal) return;
+
+    processingPollTimer?.cancel();
+    if (snapshot.status == 'completed' && snapshot.soap != null) {
+      final vitalSigns = snapshot.soap!['vital_signs'];
+      final durationSeconds = await uploadService.totalDurationSeconds(
+        sessionUuid,
+      );
+      if (!mounted) return;
+      setState(() {
+        recordingDuration = Duration(seconds: durationSeconds);
+        generatedSoapNote = SoapNote.fromDraftJson(
+          snapshot.soap!,
+          aiUsage: vitalSigns is Map<String, dynamic>
+              ? _mapFromJson(vitalSigns['ai_usage'])
+              : const {},
+        );
+        generatedTranscript = null;
+        savedConsultationId = snapshot.consultationId;
+        isConsultationSaved = true;
+        isGeneratingSummary = false;
+      });
+      unawaited(_persistDraft());
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Registro SOAP generado correctamente.')),
+      );
+    } else {
+      setState(() => isGeneratingSummary = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No se pudo completar el procesamiento. Los fragmentos permanecen guardados.',
+          ),
+        ),
       );
     }
   }
 
+  Future<void> _retryPendingProcessing() async {
+    await uploadService.retryNow();
+    final sessionUuid = processingSessionUuid ?? recordingService.sessionId;
+    if (!mounted || sessionUuid == null) return;
+    processingSnapshotNotifier.value = null;
+    setState(() => isGeneratingSummary = true);
+    _startProcessingPolling(sessionUuid);
+  }
+
+  Future<void> _cancelPendingProcessing() async {
+    final sessionUuid = processingSessionUuid ?? recordingService.sessionId;
+    processingPollTimer?.cancel();
+    if (sessionUuid != null) {
+      await uploadService.cancelSession(sessionUuid);
+    }
+    if (!mounted) return;
+    processingSnapshotNotifier.value = null;
+    setState(() => isGeneratingSummary = false);
+    processingSessionUuid = null;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Envío cancelado. El audio continúa guardado en el dispositivo.',
+        ),
+      ),
+    );
+  }
+
   Future<void> _toggleRecording() {
+    if (recordingService.controlsLocked) return Future.value();
+    if (recordingService.status == RecordingStatus.error &&
+        recordingService.hasRecoverableSession) {
+      return _stopRecording();
+    }
     if (isRecordingPaused) return _resumeRecording();
     return isRecording ? _stopRecording() : _startRecording();
   }
 
   Future<void> _pauseRecording({bool showMessage = true}) async {
-    try {
-      await audioRecorder.pause();
-      recordingTimer?.cancel();
-      final duration = _currentRecordingDuration();
-
-      if (!mounted) return;
-      setState(() {
-        isRecordingPaused = true;
-        recordingDuration = duration;
-        accumulatedRecordingDuration = duration;
-        recordingActiveStartedAt = null;
-      });
-      recordingCounter.value = duration;
-      unawaited(_persistDraft());
-
-      if (showMessage) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Grabacion pausada.')));
-      }
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo pausar la grabacion: $error')),
-      );
+    if (recordingService.controlsLocked) return;
+    final paused = await recordingService.pauseRecording();
+    if (!mounted) return;
+    if (!paused) {
+      _showRecordingError();
+      return;
+    }
+    unawaited(_persistDraft());
+    if (showMessage) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Grabación pausada.')));
     }
   }
 
   Future<void> _resumeRecording() async {
-    try {
-      await audioRecorder.resume();
-
-      if (!mounted) return;
-      setState(() {
-        isRecording = true;
-        isRecordingPaused = false;
-        recordingActiveStartedAt = DateTime.now();
-      });
-      recordingCounter.value = accumulatedRecordingDuration;
-      unawaited(_persistDraft());
-      _startRecordingTimer();
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo continuar la grabacion: $error')),
-      );
+    if (recordingService.controlsLocked) return;
+    final resumed = await recordingService.resumeRecording();
+    if (!mounted) return;
+    if (!resumed) {
+      _showRecordingError();
+      return;
     }
+    unawaited(_persistDraft());
   }
 
-  void _startRecordingTimer() {
-    recordingTimer?.cancel();
-    recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted || isRecordingPaused) return;
-
-      final duration = _currentRecordingDuration();
-      recordingDuration = duration;
-      recordingCounter.value = duration;
-      if (duration.inSeconds % 15 == 0) {
-        unawaited(_persistDraft());
-      }
-    });
-  }
-
-  Duration _currentRecordingDuration() {
-    final activeStartedAt = recordingActiveStartedAt;
-    if (activeStartedAt == null) return accumulatedRecordingDuration;
-
-    return accumulatedRecordingDuration +
-        DateTime.now().difference(activeStartedAt);
+  void _showRecordingError() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          recordingService.errorMessage ?? 'No se pudo operar el micrófono.',
+        ),
+      ),
+    );
   }
 
   Future<void> _newConsultation() async {
@@ -1298,8 +1445,8 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     setState(() {
       isGeneratingSummary = false;
       recordingDuration = Duration.zero;
-      accumulatedRecordingDuration = Duration.zero;
       recordingPath = null;
+      recordingPaths = <String>[];
       consultationStartedAt = null;
       recordingSavedAt = null;
       generatedPdfPath = null;
@@ -1309,11 +1456,10 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       isConsultationSaved = false;
       savedConsultationId = null;
     });
-    recordingCounter.value = Duration.zero;
     await _clearDraft();
   }
 
-  Future<void> _generateSoapFromAudio(String audioPath) async {
+  Future<void> _generateSoapFromAudioSegments(List<String> audioPaths) async {
     final patient = selectedPatient;
     if (patient == null) {
       if (!mounted) return;
@@ -1345,11 +1491,12 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
 
     final generationWatch = Stopwatch()..start();
     try {
-      final result = await widget.apiClient.generateConsultationDraftFromAudio(
-        pacienteId: patient.id,
-        audioPath: audioPath,
-        audioDuration: recordingDuration,
-      );
+      final result = await widget.apiClient
+          .generateConsultationDraftFromSegments(
+            pacienteId: patient.id,
+            audioPaths: audioPaths,
+            audioDuration: recordingDuration,
+          );
 
       if (!mounted) return;
       generationWatch.stop();
@@ -1453,6 +1600,15 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
         ),
       );
     } catch (error) {
+      final sessionUuid = recordingService.sessionId;
+      if (sessionUuid != null) {
+        await uploadService.recordFailure(
+          sessionUuid: sessionUuid,
+          stage: 'pdf_generation',
+          code: 'PDF_GENERATION_FAILED',
+          message: 'No se pudo generar el archivo PDF.',
+        );
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('No se pudo generar el PDF: $error')),
@@ -1577,19 +1733,29 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
           ),
           if (patient != null) ...[
             const SizedBox(height: 16),
-            ValueListenableBuilder<Duration>(
-              valueListenable: recordingCounter,
-              builder: (context, counterDuration, _) => RecordingPanel(
-                isRecording: isRecording,
-                counterDuration: counterDuration,
-                audioDuration: recordingDuration,
-                audioPath: recordingPath,
-                isPaused: isRecordingPaused,
-                onToggle: _toggleRecording,
-                onPause: isRecording && !isRecordingPaused
-                    ? () => _pauseRecording()
-                    : null,
-              ),
+            AnimatedBuilder(
+              animation: recordingService,
+              builder: (context, _) {
+                final status = recordingService.status;
+                final liveDuration = status.hasActiveSession
+                    ? recordingService.duration
+                    : recordingDuration;
+                return RecordingPanel(
+                  status: status,
+                  counterDuration: liveDuration,
+                  audioDuration: liveDuration,
+                  audioPath: recordingPath,
+                  segmentCount: recordingPaths.length,
+                  onToggle: recordingService.controlsLocked
+                      ? null
+                      : _toggleRecording,
+                  onPause:
+                      status == RecordingStatus.recording &&
+                          !recordingService.controlsLocked
+                      ? () => _pauseRecording()
+                      : null,
+                );
+              },
             ),
             const SizedBox(height: 16),
             WorkflowStatus(
@@ -1601,17 +1767,42 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
             const SizedBox(height: 16),
             if (!isGeneratingSummary &&
                 recordingPath != null &&
-                !hasGeneratedSummary)
+                !hasGeneratedSummary &&
+                recordingService.sessionId == null)
               OutlinedButton.icon(
-                onPressed: () => _generateSoapFromAudio(recordingPath!),
+                onPressed: () => _generateSoapFromAudioSegments(
+                  recordingPaths.isEmpty
+                      ? <String>[recordingPath!]
+                      : recordingPaths,
+                ),
                 icon: const Icon(Icons.auto_awesome_outlined),
                 label: const Text('Generar SOAP'),
               ),
             if (!isGeneratingSummary &&
                 recordingPath != null &&
-                !hasGeneratedSummary)
+                !hasGeneratedSummary &&
+                recordingService.sessionId == null)
               const SizedBox(height: 16),
-            if (isGeneratingSummary) const AiGenerationCard(),
+            if (isGeneratingSummary ||
+                processingSnapshotNotifier.value?.status == 'failed')
+              ValueListenableBuilder<ProcessingSnapshot?>(
+                valueListenable: processingSnapshotNotifier,
+                builder: (context, snapshot, _) => AnimatedBuilder(
+                  animation: uploadService,
+                  builder: (context, _) => AiGenerationCard(
+                    message:
+                        snapshot?.message ??
+                        uploadService.message ??
+                        'Guardando y enviando segmentos',
+                    progress: snapshot?.progress,
+                    isProcessing:
+                        isGeneratingSummary && snapshot?.status != 'failed',
+                    pendingSegments: uploadService.pendingCount,
+                    onRetry: _retryPendingProcessing,
+                    onCancel: _cancelPendingProcessing,
+                  ),
+                ),
+              ),
             if (isGeneratingSummary) const SizedBox(height: 16),
             if (hasGeneratedSummary)
               AiSummaryCard(
@@ -2153,6 +2344,24 @@ class _PatientDetailScreenState extends State<PatientDetailScreen> {
     }
   }
 
+  Future<void> _retryProcessing(ConsultationRecord consultation) async {
+    try {
+      await widget.apiClient.retryProcessing(consultation.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('El procesamiento se volverá a intentar.'),
+        ),
+      );
+      _refreshConsultations();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo iniciar el reintento: $error')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
@@ -2207,6 +2416,7 @@ class _PatientDetailScreenState extends State<PatientDetailScreen> {
                         isDownloading:
                             generatingPdfConsultationId == consultation.id,
                         onDownloadPdf: () => _downloadPdf(consultation),
+                        onRetry: () => _retryProcessing(consultation),
                         onEvaluate: () => Navigator.of(context)
                             .push(
                               MaterialPageRoute<void>(
@@ -2332,35 +2542,43 @@ class PatientSelector extends StatelessWidget {
 class RecordingPanel extends StatelessWidget {
   const RecordingPanel({
     super.key,
-    required this.isRecording,
-    required this.isPaused,
+    required this.status,
     required this.counterDuration,
     required this.audioDuration,
     required this.audioPath,
+    required this.segmentCount,
     required this.onToggle,
     this.onPause,
   });
 
-  final bool isRecording;
-  final bool isPaused;
+  final RecordingStatus status;
   final Duration counterDuration;
   final Duration audioDuration;
   final String? audioPath;
-  final VoidCallback onToggle;
+  final int segmentCount;
+  final VoidCallback? onToggle;
   final VoidCallback? onPause;
 
   @override
   Widget build(BuildContext context) {
-    final color = isRecording && !isPaused
+    final hasAudio = audioPath != null;
+    final isRecording =
+        status.hasActiveSession ||
+        (status == RecordingStatus.error && hasAudio);
+    final isPaused = status == RecordingStatus.paused;
+    final color = status == RecordingStatus.recording
         ? const Color(0xFFD94A38)
         : Theme.of(context).colorScheme.primary;
-    final label = isPaused
-        ? 'Continuar grabacion'
-        : isRecording
-        ? 'Detener grabacion'
-        : 'Iniciar grabacion';
-    final hasAudio = audioPath != null;
-
+    final label = switch (status) {
+      RecordingStatus.paused => 'Continuar grabación',
+      RecordingStatus.starting => 'Preparando micrófono…',
+      RecordingStatus.pausing => 'Pausando…',
+      RecordingStatus.resuming => 'Reanudando…',
+      RecordingStatus.recovering => 'Recuperando…',
+      RecordingStatus.stopping => 'Finalizando…',
+      _ when isRecording => 'Detener grabación',
+      _ => 'Iniciar grabación',
+    };
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(18),
@@ -2380,17 +2598,19 @@ class RecordingPanel extends StatelessWidget {
               isRecording || hasAudio
                   ? _formatDuration(counterDuration)
                   : 'Listo para grabar',
-              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900),
+              style: const TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.w900,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
             ),
             const SizedBox(height: 6),
             Text(
-              isPaused
-                  ? 'Grabacion pausada, lista para continuar'
-                  : isRecording
-                  ? 'Escuchando la consulta medico-paciente'
-                  : hasAudio
-                  ? 'Audio guardado localmente en el dispositivo'
-                  : 'El audio se usara para construir el resumen SOAP',
+              status == RecordingStatus.recording
+                  ? 'Grabando · micrófono confirmado'
+                  : status == RecordingStatus.idle && !hasAudio
+                  ? 'El audio se usará para construir el resumen SOAP'
+                  : status.label,
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey.shade700),
             ),
@@ -2407,8 +2627,13 @@ class RecordingPanel extends StatelessWidget {
                   ),
                   const InfoPill(
                     icon: Icons.save_outlined,
-                    text: 'Grabacion local',
+                    text: 'Grabación local',
                   ),
+                  if (segmentCount > 1)
+                    InfoPill(
+                      icon: Icons.library_music_outlined,
+                      text: '$segmentCount fragmentos',
+                    ),
                 ],
               ),
             const SizedBox(height: 18),
@@ -2421,7 +2646,7 @@ class RecordingPanel extends StatelessWidget {
                 icon: Icon(
                   isPaused
                       ? Icons.play_arrow
-                      : isRecording
+                      : status.hasActiveSession
                       ? Icons.stop
                       : Icons.mic_none,
                 ),
@@ -2553,30 +2778,78 @@ class FlowStep extends StatelessWidget {
 }
 
 class AiGenerationCard extends StatelessWidget {
-  const AiGenerationCard({super.key});
+  const AiGenerationCard({
+    super.key,
+    required this.message,
+    this.progress,
+    this.isProcessing = true,
+    this.pendingSegments = 0,
+    this.onRetry,
+    this.onCancel,
+  });
+
+  final String message;
+  final int? progress;
+  final bool isProcessing;
+  final int pendingSegments;
+  final VoidCallback? onRetry;
+  final VoidCallback? onCancel;
 
   @override
   Widget build(BuildContext context) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(
-              width: 22,
-              height: 22,
-              child: CircularProgressIndicator(strokeWidth: 2.4),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                'Generando SOAP desde el audio',
-                style: TextStyle(
-                  color: Colors.grey.shade800,
-                  fontWeight: FontWeight.w800,
+            Row(
+              children: [
+                SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: isProcessing
+                      ? const CircularProgressIndicator(strokeWidth: 2.4)
+                      : const Icon(Icons.error_outline),
                 ),
-              ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    message,
+                    style: TextStyle(
+                      color: Colors.grey.shade800,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
             ),
+            if (progress != null) const SizedBox(height: 12),
+            if (progress != null)
+              LinearProgressIndicator(value: progress!.clamp(0, 100) / 100),
+            if (pendingSegments > 0) const SizedBox(height: 8),
+            if (pendingSegments > 0)
+              Text('$pendingSegments fragmento(s) pendiente(s) de envío'),
+            if (onRetry != null || onCancel != null) const SizedBox(height: 8),
+            if (onRetry != null || onCancel != null)
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  if (onCancel != null)
+                    TextButton.icon(
+                      onPressed: onCancel,
+                      icon: const Icon(Icons.close),
+                      label: const Text('Cancelar'),
+                    ),
+                  if (onRetry != null) const SizedBox(width: 8),
+                  if (onRetry != null)
+                    FilledButton.tonalIcon(
+                      onPressed: onRetry,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Reintentar'),
+                    ),
+                ],
+              ),
           ],
         ),
       ),
@@ -3261,12 +3534,14 @@ class PatientConsultationCard extends StatelessWidget {
     required this.isDownloading,
     required this.onDownloadPdf,
     required this.onEvaluate,
+    required this.onRetry,
   });
 
   final ConsultationRecord consultation;
   final bool isDownloading;
   final VoidCallback onDownloadPdf;
   final VoidCallback onEvaluate;
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -3294,7 +3569,8 @@ class PatientConsultationCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          consultation.evaluationCode ??
+                          consultation.consultationCode ??
+                              consultation.evaluationCode ??
                               'Consulta #${consultation.id}',
                           style: const TextStyle(
                             fontWeight: FontWeight.w900,
@@ -3329,6 +3605,23 @@ class PatientConsultationCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 12),
+              if (consultation.failureStage != null) ...[
+                Text(
+                  'Fallo en: ${consultation.failureStage}',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (consultation.failureMessage != null)
+                  Text(consultation.failureMessage!),
+                Text(
+                  '${consultation.receivedSegments}/${consultation.expectedSegments} segmentos enviados · '
+                  '${consultation.transcribedSegments} transcritos · '
+                  'SOAP: ${consultation.soapGenerated ? 'Sí' : 'No'}',
+                ),
+                const SizedBox(height: 10),
+              ],
               Row(
                 children: [
                   Expanded(
@@ -3341,7 +3634,9 @@ class PatientConsultationCard extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: isDownloading ? null : onDownloadPdf,
+                      onPressed: isDownloading || !consultation.soapGenerated
+                          ? null
+                          : onDownloadPdf,
                       icon: isDownloading
                           ? const SizedBox(
                               width: 18,
@@ -3354,6 +3649,17 @@ class PatientConsultationCard extends StatelessWidget {
                   ),
                 ],
               ),
+              if (consultation.overallStatus == 'failed') ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: onRetry,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Reintentar procesamiento'),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -3444,21 +3750,6 @@ class PatientSummary extends StatelessWidget {
                       Text(patient.dni),
                     ],
                   ),
-                ),
-              ],
-            ),
-            const Divider(height: 28),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                InfoPill(
-                  icon: Icons.cake_outlined,
-                  text: '${patient.age} anos',
-                ),
-                const InfoPill(
-                  icon: Icons.warning_amber_outlined,
-                  text: 'Sin alertas',
                 ),
               ],
             ),
@@ -3685,6 +3976,14 @@ class ConsultationRecord {
     this.pdfUrl,
     this.evaluationStatus = 'pending',
     this.evaluationCode,
+    this.consultationCode,
+    this.overallStatus = 'completed',
+    this.failureStage,
+    this.failureMessage,
+    this.soapGenerated = true,
+    this.expectedSegments = 0,
+    this.receivedSegments = 0,
+    this.transcribedSegments = 0,
   });
 
   final int id;
@@ -3700,6 +3999,14 @@ class ConsultationRecord {
   final String? pdfUrl;
   final String evaluationStatus;
   final String? evaluationCode;
+  final String? consultationCode;
+  final String overallStatus;
+  final String? failureStage;
+  final String? failureMessage;
+  final bool soapGenerated;
+  final int expectedSegments;
+  final int receivedSegments;
+  final int transcribedSegments;
 
   factory ConsultationRecord.fromJson(
     Map<String, dynamic> json, {
@@ -3731,9 +4038,7 @@ class ConsultationRecord {
       patient: patient,
       title: reason == 'no especificado' ? assessment : reason,
       date: _formatDateTime(consultedAt),
-      status: localPdfPath == null && pdfUrl == null
-          ? 'SOAP guardado'
-          : 'PDF disponible',
+      status: _consultationStatusLabel(json['overall_status']?.toString()),
       consultedAt: consultedAt,
       soapNote: SoapNote(
         reason: reason,
@@ -3758,9 +4063,27 @@ class ConsultationRecord {
       evaluationCode:
           (json['soap_evaluation'] as Map<String, dynamic>?)?['test_code']
               ?.toString(),
+      consultationCode: json['consultation_code']?.toString(),
+      overallStatus: json['overall_status']?.toString() ?? 'completed',
+      failureStage: json['failure_stage']?.toString(),
+      failureMessage: json['user_friendly_error_message']?.toString(),
+      soapGenerated: json['soap_status']?.toString() == 'completed',
+      expectedSegments: (json['expected_segments'] as num?)?.toInt() ?? 0,
+      receivedSegments: (json['received_segments'] as num?)?.toInt() ?? 0,
+      transcribedSegments: (json['transcribed_segments'] as num?)?.toInt() ?? 0,
     );
   }
 }
+
+String _consultationStatusLabel(String? status) => switch (status) {
+  'failed' => 'No completada',
+  'completed_with_warnings' => 'Completada con advertencias',
+  'cancelled' => 'Cancelada',
+  'pending_sync' => 'Pendiente de sincronizar',
+  'recording' => 'Grabando',
+  'transcribing' || 'generating_soap' || 'uploading' => 'Procesando',
+  _ => 'Completada',
+};
 
 class ConsultationSummary {
   const ConsultationSummary({
@@ -3826,7 +4149,7 @@ class ApiSession {
   bool get isAdmin => roles.contains('admin');
 }
 
-class ApiClient {
+class ApiClient implements SegmentBackendClient {
   ApiClient({FlutterSecureStorage? secureStorage})
     : secureStorage = secureStorage ?? const FlutterSecureStorage();
 
@@ -3847,6 +4170,126 @@ class ApiClient {
 
   bool get isAuthenticated => _token != null;
   bool get isAdmin => _isAdmin;
+
+  Future<String?> professionalIdentifier() =>
+      secureStorage.read(key: _sessionEmailKey);
+
+  @override
+  Future<BackendRecordingSession> startRecordingSession({
+    required String sessionUuid,
+    required int patientId,
+    required DateTime startedAt,
+    required String localConsultationCode,
+    required bool createdOffline,
+  }) async {
+    final data = await _post('/consultations/start', {
+      'session_uuid': sessionUuid,
+      'patient_id': patientId,
+      'started_at': startedAt.toUtc().toIso8601String(),
+      'local_consultation_code': localConsultationCode,
+      'created_offline': createdOffline,
+    }).timeout(const Duration(seconds: 30));
+    return BackendRecordingSession(
+      consultationId: (data['consultation_id'] as num).toInt(),
+      sessionUuid: data['session_uuid'].toString(),
+      consultationCode: data['consultation_code']?.toString(),
+    );
+  }
+
+  @override
+  Future<void> reportConsultationFailure({
+    required int consultationId,
+    required String stage,
+    required String code,
+    required String message,
+  }) async {
+    await _post('/consultations/$consultationId/failure', {
+      'failure_stage': stage,
+      'failure_code': code,
+      'failure_message': message,
+    });
+  }
+
+  @override
+  Future<String> uploadAudioSegment({
+    required int consultationId,
+    required LocalAudioSegment segment,
+  }) async {
+    final request =
+        http.MultipartRequest(
+            'POST',
+            Uri.parse('$baseUrl/consultations/$consultationId/segments'),
+          )
+          ..headers.addAll(_multipartHeaders)
+          ..fields['session_uuid'] = segment.sessionUuid
+          ..fields['segment_number'] = segment.segmentNumber.toString()
+          ..fields['duration_seconds'] = segment.durationSeconds.toString()
+          ..fields['is_final'] = segment.isFinal ? '1' : '0'
+          ..fields['checksum'] = segment.checksum
+          ..files.add(
+            await http.MultipartFile.fromPath(
+              'audio',
+              segment.localPath,
+              contentType: MediaType('audio', 'mp4'),
+            ),
+          );
+    final response = await request.send().timeout(const Duration(seconds: 30));
+    final body = await response.stream.bytesToString().timeout(
+      const Duration(minutes: 2),
+    );
+    final data = _decodeBody(response.statusCode, body);
+    return data['checksum']?.toString() ?? '';
+  }
+
+  @override
+  Future<void> finalizeRecordingSession({
+    required int consultationId,
+    required String sessionUuid,
+    required int expectedSegments,
+  }) async {
+    await _post('/consultations/$consultationId/finalize', {
+      'session_uuid': sessionUuid,
+      'expected_segments': expectedSegments,
+    }).timeout(const Duration(seconds: 30));
+  }
+
+  @override
+  Future<ProcessingSnapshot> processingStatus(int consultationId) async {
+    final data = await _get(
+      '/consultations/$consultationId/processing-status',
+    ).timeout(const Duration(seconds: 30));
+    return ProcessingSnapshot(
+      consultationId: (data['consultation_id'] as num).toInt(),
+      sessionUuid: data['session_uuid'].toString(),
+      status: data['processing_status'].toString(),
+      soapStatus: data['soap_status'].toString(),
+      progress: (data['progress_percentage'] as num?)?.toInt() ?? 0,
+      message: data['message']?.toString() ?? 'Procesando consulta',
+      expectedSegments: (data['expected_segments'] as num?)?.toInt() ?? 0,
+      receivedSegments: (data['received_segments'] as num?)?.toInt() ?? 0,
+      transcribedSegments: (data['transcribed_segments'] as num?)?.toInt() ?? 0,
+      failedSegments: (data['failed_segments'] as num?)?.toInt() ?? 0,
+      soap: data['soap'] is Map<String, dynamic>
+          ? data['soap'] as Map<String, dynamic>
+          : null,
+    );
+  }
+
+  @override
+  Future<void> retryProcessing(int consultationId) async {
+    await _post(
+      '/consultations/$consultationId/retry-processing',
+      const {},
+    ).timeout(const Duration(seconds: 30));
+  }
+
+  @override
+  Future<void> cancelProcessing(int consultationId) async {
+    await _post(
+      '/consultations/$consultationId/cancel-processing',
+      const {},
+    ).timeout(const Duration(seconds: 30));
+  }
 
   Map<String, String> get _headers {
     return {
@@ -4293,6 +4736,53 @@ class ApiClient {
     final body = await response.stream.bytesToString();
     final data = _decodeBody(response.statusCode, body);
 
+    return SoapDraftResult.fromJson(data);
+  }
+
+  Future<SoapDraftResult> generateConsultationDraftFromSegments({
+    required int pacienteId,
+    required List<String> audioPaths,
+    required Duration audioDuration,
+  }) async {
+    if (audioPaths.isEmpty) {
+      throw ArgumentError('No hay fragmentos de audio para procesar.');
+    }
+    if (audioPaths.length == 1) {
+      return generateConsultationDraftFromAudio(
+        pacienteId: pacienteId,
+        audioPath: audioPaths.single,
+        audioDuration: audioDuration,
+      );
+    }
+
+    final transcripts = <String>[];
+    for (final audioPath in audioPaths) {
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$baseUrl/ai/transcriptions'),
+      )..headers.addAll(_multipartHeaders);
+      request.files.add(
+        await http.MultipartFile.fromPath(
+          'audio',
+          audioPath,
+          contentType: MediaType('audio', 'mp4'),
+        ),
+      );
+      final response = await request.send();
+      final body = await response.stream.bytesToString();
+      final data = _decodeBody(response.statusCode, body);
+      final transcript = data['transcript']?.toString().trim() ?? '';
+      if (transcript.isNotEmpty) transcripts.add(transcript);
+    }
+    if (transcripts.isEmpty) {
+      throw Exception('No se detectó voz en los fragmentos conservados.');
+    }
+
+    final data = await _post('/ai/consultation-draft', {
+      'patient_id': pacienteId,
+      'transcript': transcripts.join('\n\n'),
+      'audio_duration_seconds': audioDuration.inSeconds,
+    });
     return SoapDraftResult.fromJson(data);
   }
 

@@ -16,6 +16,14 @@ class SoapEvaluation {
     this.aiSeconds,
     this.consultationSeconds,
     this.lastSavedAt,
+    this.consultationCode,
+    this.overallStatus = 'completed',
+    this.soapStatus = 'completed',
+    this.failureStage,
+    this.failureMessage,
+    this.expectedSegments = 0,
+    this.receivedSegments = 0,
+    this.transcribedSegments = 0,
   });
 
   final int id;
@@ -31,6 +39,14 @@ class SoapEvaluation {
   int? aiSeconds;
   int? consultationSeconds;
   DateTime? lastSavedAt;
+  final String? consultationCode;
+  final String overallStatus;
+  final String soapStatus;
+  final String? failureStage;
+  final String? failureMessage;
+  final int expectedSegments;
+  final int receivedSegments;
+  final int transcribedSegments;
   final Map<String, dynamic> values;
 
   factory SoapEvaluation.fromJson(Map<String, dynamic> json) {
@@ -38,7 +54,6 @@ class SoapEvaluation {
       'consultation_duration_seconds',
       'consultation_duration_source',
       'manual_time_seconds',
-      'error_observations',
       'use_prototype',
       'audio_transcription',
       'clinical_processing',
@@ -68,6 +83,18 @@ class SoapEvaluation {
       'ease_5',
       'ease_6',
     ];
+    final consultation = json['consultation'] is Map<String, dynamic>
+        ? json['consultation'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final legacyErrorScale = json['error_scale_version'] != 2;
+    dynamic editableValue(String key) {
+      final value = json[key];
+      if (!legacyErrorScale || !key.startsWith('error_') || value is! num) {
+        return value;
+      }
+      return const {0: 5, 1: 4, 2: 3, 3: 2}[value.toInt()] ?? value;
+    }
+
     return SoapEvaluation(
       id: (json['id'] as num).toInt(),
       consultationId: (json['consultation_id'] as num).toInt(),
@@ -84,7 +111,18 @@ class SoapEvaluation {
       consultationSeconds: (json['consultation_duration_seconds'] as num?)
           ?.toInt(),
       lastSavedAt: DateTime.tryParse(json['last_saved_at']?.toString() ?? ''),
-      values: {for (final key in editable) key: json[key]},
+      consultationCode: consultation['consultation_code']?.toString(),
+      overallStatus: consultation['overall_status']?.toString() ?? 'completed',
+      soapStatus: consultation['soap_status']?.toString() ?? 'completed',
+      failureStage: consultation['failure_stage']?.toString(),
+      failureMessage: consultation['user_friendly_error_message']?.toString(),
+      expectedSegments:
+          (consultation['expected_segments'] as num?)?.toInt() ?? 0,
+      receivedSegments:
+          (consultation['received_segments'] as num?)?.toInt() ?? 0,
+      transcribedSegments:
+          (consultation['transcribed_segments'] as num?)?.toInt() ?? 0,
+      values: {for (final key in editable) key: editableValue(key)},
     );
   }
 
@@ -102,13 +140,37 @@ class SoapEvaluation {
     'audio_duration_seconds': audioSeconds,
     'ai_time_seconds': aiSeconds,
     'last_saved_at': lastSavedAt?.toIso8601String(),
+    'error_scale_version': 2,
     ...values,
   };
 
-  int get answered =>
-      _requiredEvaluationFields.where((key) => values[key] != null).length;
-  double get progress => answered / _requiredEvaluationFields.length;
+  bool get hasSoap => soapStatus == 'completed';
+  List<String> get requiredFields => hasSoap
+      ? _requiredEvaluationFields
+      : _requiredEvaluationFieldsWithoutSoap;
+  int get answered => requiredFields.where((key) => values[key] != null).length;
+  double get progress => answered / requiredFields.length;
 }
+
+const _requiredEvaluationFieldsWithoutSoap = <String>[
+  'use_prototype',
+  'audio_transcription',
+  'clinical_processing',
+  'soap_generation',
+  'manual_time_seconds',
+  'utility_1',
+  'utility_2',
+  'utility_3',
+  'utility_4',
+  'utility_5',
+  'utility_6',
+  'ease_1',
+  'ease_2',
+  'ease_3',
+  'ease_4',
+  'ease_5',
+  'ease_6',
+];
 
 const _requiredEvaluationFields = <String>[
   'use_prototype',
@@ -163,12 +225,12 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
   bool completing = false;
   String saveState = 'Guardado';
   Timer? debounce;
+  int editRevision = 0;
   final scrollController = ScrollController();
   final manualMinutes = TextEditingController();
   final manualSeconds = TextEditingController();
   final consultationMinutes = TextEditingController();
   final consultationSeconds = TextEditingController();
-  final observations = TextEditingController();
 
   String get draftKey => evaluation == null
       ? ''
@@ -190,7 +252,6 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
     manualSeconds.dispose();
     consultationMinutes.dispose();
     consultationSeconds.dispose();
-    observations.dispose();
     super.dispose();
   }
 
@@ -242,12 +303,12 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
       consultationMinutes.text = '${consultation ~/ 60}';
       consultationSeconds.text = '${consultation % 60}';
     }
-    observations.text = value.values['error_observations']?.toString() ?? '';
   }
 
   void _change(String key, dynamic value) {
     if (evaluation?.status == 'completed' && !widget.apiClient.isAdmin) return;
     setState(() {
+      editRevision++;
       evaluation!.values[key] = value;
       saveState = 'Guardando…';
     });
@@ -265,6 +326,11 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
     TextEditingController seconds, {
     String? sourceKey,
   }) {
+    if (minutes.text.isEmpty && seconds.text.isEmpty) {
+      _change(key, null);
+      if (sourceKey != null) _change(sourceKey, 'manual');
+      return;
+    }
     final min = int.tryParse(minutes.text) ?? 0;
     final sec = int.tryParse(seconds.text) ?? 0;
     if (min < 0 || sec < 0 || sec > 59) return;
@@ -290,15 +356,22 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
       return true;
     }
     debounce?.cancel();
+    final revisionBeingSaved = editRevision;
     setState(() {
       saving = true;
       saveState = 'Guardando…';
     });
     try {
       final saved = await widget.apiClient.saveSoapEvaluation(item);
-      _setEvaluation(saved);
-      await widget.apiClient.secureStorage.delete(key: draftKey);
-      if (mounted) setState(() => saveState = 'Guardado');
+      if (revisionBeingSaved == editRevision) {
+        _setEvaluation(saved);
+        await widget.apiClient.secureStorage.delete(key: draftKey);
+        if (mounted) setState(() => saveState = 'Guardado');
+      } else {
+        item.version = saved.version;
+        item.status = saved.status;
+        item.lastSavedAt = saved.lastSavedAt;
+      }
       if (showMessage && mounted) {
         ScaffoldMessenger.of(
           context,
@@ -312,13 +385,21 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
       }
       return false;
     } finally {
-      if (mounted) setState(() => saving = false);
+      if (mounted) {
+        setState(() => saving = false);
+        if (revisionBeingSaved != editRevision) {
+          debounce = Timer(
+            const Duration(milliseconds: 300),
+            () => unawaited(_save()),
+          );
+        }
+      }
     }
   }
 
   Future<void> _complete() async {
     final item = evaluation!;
-    final missing = _requiredEvaluationFields
+    final missing = item.requiredFields
         .where((key) => item.values[key] == null)
         .toList();
     if (missing.isNotEmpty) {
@@ -547,11 +628,24 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
             ),
             const Divider(height: 28),
             _info('Código', evaluation!.code),
+            _info(
+              'Código de consulta',
+              evaluation!.consultationCode ?? 'Pendiente de sincronización',
+            ),
             _info('Fecha', evaluation!.date),
             _info('Evaluador', evaluation!.evaluatorName),
             _info('Especialidad', evaluation!.specialization),
             _info('Duración del audio', _readable(evaluation!.audioSeconds)),
             _info('Tiempo de generación', _readable(evaluation!.aiSeconds)),
+            _info('Estado técnico', evaluation!.overallStatus),
+            if (evaluation!.failureStage != null)
+              _info('Etapa del fallo', evaluation!.failureStage!),
+            if (evaluation!.failureMessage != null)
+              _info('Mensaje', evaluation!.failureMessage!),
+            _info(
+              'Segmentos',
+              '${evaluation!.receivedSegments}/${evaluation!.expectedSegments} enviados · ${evaluation!.transcribedSegments} transcritos',
+            ),
           ],
         ),
       ),
@@ -595,7 +689,9 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
       'soap_placement': 'La información está ubicada adecuadamente.',
       'soap_clarity': 'La información se presenta clara y ordenada.',
     },
-    const {0: 'No cumple', 1: 'Cumple parcialmente', 2: 'Cumple'},
+    evaluation!.hasSoap
+        ? const {0: 'No cumple', 1: 'Cumple parcialmente', 2: 'Cumple'}
+        : const {98: 'No aplica: no se generó SOAP'},
   );
   List<Widget> _errorSection() => [
     ..._questions(
@@ -608,18 +704,15 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
         'error_placement': 'Ubicación incorrecta en las secciones SOAP.',
         'error_wording': 'Redacción ambigua o poco clara.',
       },
-      const {0: 'No presenta', 1: 'Leve', 2: 'Moderado', 3: 'Grave'},
-    ),
-    const SizedBox(height: 12),
-    TextField(
-      controller: observations,
-      maxLength: 2000,
-      maxLines: 5,
-      onChanged: (value) => _change('error_observations', value),
-      decoration: const InputDecoration(
-        labelText: 'Observaciones sobre los errores',
-        helperText: 'No incluya datos identificables del paciente.',
-      ),
+      evaluation!.hasSoap
+          ? const {
+              1: 'Totalmente erróneo',
+              2: 'Grave',
+              3: 'Moderado',
+              4: 'Leve',
+              5: 'No presenta',
+            }
+          : const {98: 'No aplica: no se generó SOAP'},
     ),
   ];
   List<Widget> _acceptanceSection() => [
@@ -742,20 +835,16 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
                 'Duración aproximada de la consulta',
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
-              if (evaluation!.consultationSeconds == null)
-                _durationInputs(consultationMinutes, consultationSeconds, () {
-                  _timeChanged(
-                    'consultation_duration_seconds',
-                    consultationMinutes,
-                    consultationSeconds,
-                    sourceKey: 'consultation_duration_source',
-                  );
-                  evaluation!.consultationSeconds =
-                      (int.tryParse(consultationMinutes.text) ?? 0) * 60 +
-                      (int.tryParse(consultationSeconds.text) ?? 0);
-                })
-              else
-                _info('Duración', _readable(evaluation!.consultationSeconds)),
+              _durationInputs(
+                consultationMinutes,
+                consultationSeconds,
+                () => _timeChanged(
+                  'consultation_duration_seconds',
+                  consultationMinutes,
+                  consultationSeconds,
+                  sourceKey: 'consultation_duration_source',
+                ),
+              ),
             ],
           ),
         ),
@@ -773,6 +862,10 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
         child: TextField(
           controller: minutes,
           keyboardType: TextInputType.number,
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(4),
+          ],
           onChanged: (_) => changed(),
           decoration: const InputDecoration(labelText: 'Minutos'),
         ),
@@ -782,6 +875,14 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
         child: TextField(
           controller: seconds,
           keyboardType: TextInputType.number,
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(2),
+            TextInputFormatter.withFunction((oldValue, newValue) {
+              final value = int.tryParse(newValue.text);
+              return value == null || value <= 59 ? newValue : oldValue;
+            }),
+          ],
           onChanged: (_) => changed(),
           decoration: const InputDecoration(labelText: 'Segundos (0–59)'),
         ),
