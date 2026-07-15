@@ -954,6 +954,8 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   late final RecordingService recordingService;
   late final ProgressiveUploadService uploadService;
   Timer? processingPollTimer;
+  Timer? processingElapsedTimer;
+  final Stopwatch processingStopwatch = Stopwatch();
   late final ValueNotifier<ProcessingSnapshot?> processingSnapshotNotifier;
   String? processingSessionUuid;
   DateTime? consultationStartedAt;
@@ -1012,6 +1014,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     WidgetsBinding.instance.removeObserver(this);
     recordingService.removeListener(_onRecordingStateChanged);
     processingPollTimer?.cancel();
+    processingElapsedTimer?.cancel();
     processingSnapshotNotifier.dispose();
     super.dispose();
   }
@@ -1298,7 +1301,12 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     if (result.paths.isNotEmpty) {
       final sessionUuid = recordingService.sessionId;
       if (sessionUuid != null) {
-        if (autoGenerateSoap) setState(() => isGeneratingSummary = true);
+        if (autoGenerateSoap) {
+          processingStopwatch
+            ..reset()
+            ..start();
+          setState(() => isGeneratingSummary = true);
+        }
         await uploadService.finishSession(
           sessionUuid: sessionUuid,
           expectedSegments: result.paths.length,
@@ -1309,8 +1317,13 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   }
 
   void _startProcessingPolling(String sessionUuid) {
+    if (!processingStopwatch.isRunning) processingStopwatch.start();
     processingSessionUuid = sessionUuid;
     processingPollTimer?.cancel();
+    processingElapsedTimer?.cancel();
+    processingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && isGeneratingSummary) setState(() {});
+    });
     unawaited(_pollProcessingStatus(sessionUuid));
     processingPollTimer = Timer.periodic(
       const Duration(seconds: 4),
@@ -1325,6 +1338,8 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     if (!snapshot.isTerminal) return;
 
     processingPollTimer?.cancel();
+    processingElapsedTimer?.cancel();
+    processingStopwatch.stop();
     if (snapshot.status == 'completed' && snapshot.soap != null) {
       final vitalSigns = snapshot.soap!['vital_signs'];
       final durationSeconds = await uploadService.totalDurationSeconds(
@@ -1346,17 +1361,17 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       });
       unawaited(_persistDraft());
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Registro SOAP generado correctamente.')),
-      );
-    } else {
-      setState(() => isGeneratingSummary = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
-            'No se pudo completar el procesamiento. Los fragmentos permanecen guardados.',
+            'Registro SOAP generado. Tiempo: ${snapshot.processingTimeSeconds?.toStringAsFixed(1) ?? '--'} s · ${snapshot.processingTimeLabel ?? 'Sin clasificación'}',
           ),
         ),
       );
+    } else {
+      setState(() => isGeneratingSummary = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(snapshot.message)));
     }
   }
 
@@ -1365,6 +1380,9 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     final sessionUuid = processingSessionUuid ?? recordingService.sessionId;
     if (!mounted || sessionUuid == null) return;
     processingSnapshotNotifier.value = null;
+    processingStopwatch
+      ..reset()
+      ..start();
     setState(() => isGeneratingSummary = true);
     _startProcessingPolling(sessionUuid);
   }
@@ -1372,6 +1390,8 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   Future<void> _cancelPendingProcessing() async {
     final sessionUuid = processingSessionUuid ?? recordingService.sessionId;
     processingPollTimer?.cancel();
+    processingElapsedTimer?.cancel();
+    processingStopwatch.stop();
     if (sessionUuid != null) {
       await uploadService.cancelSession(sessionUuid);
     }
@@ -1456,6 +1476,8 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       isConsultationSaved = false;
       savedConsultationId = null;
     });
+    processingStopwatch.reset();
+    processingSnapshotNotifier.value = null;
     await _clearDraft();
   }
 
@@ -1783,8 +1805,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
                 !hasGeneratedSummary &&
                 recordingService.sessionId == null)
               const SizedBox(height: 16),
-            if (isGeneratingSummary ||
-                processingSnapshotNotifier.value?.status == 'failed')
+            if (isGeneratingSummary || processingSnapshotNotifier.value != null)
               ValueListenableBuilder<ProcessingSnapshot?>(
                 valueListenable: processingSnapshotNotifier,
                 builder: (context, snapshot, _) => AnimatedBuilder(
@@ -1798,8 +1819,18 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
                     isProcessing:
                         isGeneratingSummary && snapshot?.status != 'failed',
                     pendingSegments: uploadService.pendingCount,
-                    onRetry: _retryPendingProcessing,
-                    onCancel: _cancelPendingProcessing,
+                    status: snapshot?.status,
+                    localElapsed: processingStopwatch.elapsed,
+                    officialSeconds: snapshot?.processingTimeSeconds,
+                    classification: snapshot?.processingTimeLabel,
+                    onRetry:
+                        snapshot?.status == 'failed' ||
+                            snapshot?.status == 'timeout'
+                        ? _retryPendingProcessing
+                        : null,
+                    onCancel: isGeneratingSummary
+                        ? _cancelPendingProcessing
+                        : null,
                   ),
                 ),
               ),
@@ -2784,6 +2815,10 @@ class AiGenerationCard extends StatelessWidget {
     this.progress,
     this.isProcessing = true,
     this.pendingSegments = 0,
+    this.status,
+    this.localElapsed = Duration.zero,
+    this.officialSeconds,
+    this.classification,
     this.onRetry,
     this.onCancel,
   });
@@ -2792,6 +2827,10 @@ class AiGenerationCard extends StatelessWidget {
   final int? progress;
   final bool isProcessing;
   final int pendingSegments;
+  final String? status;
+  final Duration localElapsed;
+  final double? officialSeconds;
+  final String? classification;
   final VoidCallback? onRetry;
   final VoidCallback? onCancel;
 
@@ -2810,7 +2849,11 @@ class AiGenerationCard extends StatelessWidget {
                   height: 22,
                   child: isProcessing
                       ? const CircularProgressIndicator(strokeWidth: 2.4)
-                      : const Icon(Icons.error_outline),
+                      : Icon(
+                          status == 'completed'
+                              ? Icons.check_circle_outline
+                              : Icons.error_outline,
+                        ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -2827,6 +2870,13 @@ class AiGenerationCard extends StatelessWidget {
             if (progress != null) const SizedBox(height: 12),
             if (progress != null)
               LinearProgressIndicator(value: progress!.clamp(0, 100) / 100),
+            const SizedBox(height: 8),
+            Text(
+              officialSeconds != null
+                  ? 'Tiempo de generación: ${officialSeconds!.toStringAsFixed(1)} segundos'
+                  : 'Tiempo transcurrido (referencia local): ${(localElapsed.inMilliseconds / 1000).toStringAsFixed(1)} segundos',
+            ),
+            if (classification != null) Text('Clasificación: $classification'),
             if (pendingSegments > 0) const SizedBox(height: 8),
             if (pendingSegments > 0)
               Text('$pendingSegments fragmento(s) pendiente(s) de envío'),
@@ -4077,6 +4127,7 @@ class ConsultationRecord {
 
 String _consultationStatusLabel(String? status) => switch (status) {
   'failed' => 'No completada',
+  'timeout' => 'Tiempo agotado',
   'completed_with_warnings' => 'Completada con advertencias',
   'cancelled' => 'Cancelada',
   'pending_sync' => 'Pendiente de sincronizar',
@@ -4269,6 +4320,16 @@ class ApiClient implements SegmentBackendClient {
       receivedSegments: (data['received_segments'] as num?)?.toInt() ?? 0,
       transcribedSegments: (data['transcribed_segments'] as num?)?.toInt() ?? 0,
       failedSegments: (data['failed_segments'] as num?)?.toInt() ?? 0,
+      consultationCode: data['consultation_code']?.toString(),
+      processingTimeMs: (data['processing_time_ms'] as num?)?.toInt(),
+      processingTimeSeconds: (data['processing_time_seconds'] as num?)
+          ?.toDouble(),
+      processingTimeRange: (data['processing_time_range'] as num?)?.toInt(),
+      processingTimeLabel: data['processing_time_label']?.toString(),
+      errorCode: data['error_code']?.toString(),
+      errorStage: data['error_stage']?.toString(),
+      retryCount: (data['retry_count'] as num?)?.toInt() ?? 0,
+      soapGenerated: data['soap_generated'] == true,
       soap: data['soap'] is Map<String, dynamic>
           ? data['soap'] as Map<String, dynamic>
           : null,

@@ -14,6 +14,12 @@ class SoapEvaluation {
     required this.values,
     this.audioSeconds,
     this.aiSeconds,
+    this.prototypeSeconds,
+    this.prototypeTimeRange,
+    this.prototypeTimeLabel,
+    this.manualTimeRange,
+    this.manualTimeLabel,
+    this.timeDifferenceSeconds,
     this.consultationSeconds,
     this.lastSavedAt,
     this.consultationCode,
@@ -37,6 +43,12 @@ class SoapEvaluation {
   int version;
   int? audioSeconds;
   int? aiSeconds;
+  final double? prototypeSeconds;
+  final int? prototypeTimeRange;
+  final String? prototypeTimeLabel;
+  final int? manualTimeRange;
+  final String? manualTimeLabel;
+  final double? timeDifferenceSeconds;
   int? consultationSeconds;
   DateTime? lastSavedAt;
   final String? consultationCode;
@@ -120,6 +132,17 @@ class SoapEvaluation {
       version: (json['version'] as num?)?.toInt() ?? 1,
       audioSeconds: (json['audio_duration_seconds'] as num?)?.toInt(),
       aiSeconds: (json['ai_time_seconds'] as num?)?.toInt(),
+      prototypeSeconds:
+          _nullableDouble(consultation['processing_time_seconds']) ??
+          _nullableDouble(json['ai_time_seconds']),
+      prototypeTimeRange: (consultation['processing_time_range'] as num?)
+          ?.toInt(),
+      prototypeTimeLabel: consultation['processing_time_label']?.toString(),
+      manualTimeRange: (json['manual_time_range'] as num?)?.toInt(),
+      manualTimeLabel: json['manual_time_label']?.toString(),
+      timeDifferenceSeconds:
+          _nullableDouble(json['time_difference_seconds_exact']) ??
+          _nullableDouble(json['time_difference_seconds']),
       consultationSeconds: (json['consultation_duration_seconds'] as num?)
           ?.toInt(),
       lastSavedAt: DateTime.tryParse(json['last_saved_at']?.toString() ?? ''),
@@ -151,6 +174,10 @@ class SoapEvaluation {
     'version': version,
     'audio_duration_seconds': audioSeconds,
     'ai_time_seconds': aiSeconds,
+    'manual_time_range': manualTimeRange,
+    'manual_time_label': manualTimeLabel,
+    'time_difference_seconds': timeDifferenceSeconds,
+    'time_difference_seconds_exact': timeDifferenceSeconds,
     'last_saved_at': lastSavedAt?.toIso8601String(),
     'error_scale_version': 2,
     'soap_scale_version': 2,
@@ -667,7 +694,15 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
             _info('Evaluador', evaluation!.evaluatorName),
             _info('Especialidad', evaluation!.specialization),
             _info('Duración del audio', _readable(evaluation!.audioSeconds)),
-            _info('Tiempo de generación', _readable(evaluation!.aiSeconds)),
+            _info(
+              'Tiempo de generación',
+              _readablePrecise(evaluation!.prototypeSeconds),
+            ),
+            if (evaluation!.prototypeTimeLabel != null)
+              _info(
+                'Rango de generación',
+                '${evaluation!.prototypeTimeRange} · ${evaluation!.prototypeTimeLabel}',
+              ),
             _info('Estado técnico', evaluation!.overallStatus),
             if (evaluation!.failureStage != null)
               _info('Etapa del fallo', evaluation!.failureStage!),
@@ -816,9 +851,12 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
     ),
   );
   List<Widget> _timeSection() {
-    final ai = evaluation!.aiSeconds;
+    final ai = evaluation!.prototypeSeconds;
     final manual = (evaluation!.values['manual_time_seconds'] as num?)?.toInt();
     final difference = ai == null || manual == null ? null : manual - ai;
+    final manualClassification = manual == null
+        ? null
+        : _timeClassification(manual.toDouble());
     return [
       Card(
         child: Padding(
@@ -826,7 +864,13 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _info('Tiempo del prototipo', _readable(ai)),
+              _info('Tiempo del prototipo', _readablePrecise(ai)),
+              _info(
+                'Clasificación del prototipo',
+                evaluation!.prototypeTimeLabel == null
+                    ? 'Dato no disponible'
+                    : '${evaluation!.prototypeTimeRange} · ${evaluation!.prototypeTimeLabel}',
+              ),
               const SizedBox(height: 12),
               const Text(
                 'Tiempo manual estimado',
@@ -841,8 +885,26 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
                   manualSeconds,
                 ),
               ),
+              if (manualClassification != null) ...[
+                _info(
+                  'Tiempo manual',
+                  _readablePreciseWithMinutes(manual!.toDouble()),
+                ),
+                _info(
+                  'Clasificación manual',
+                  '${manualClassification.$1} · ${manualClassification.$2}',
+                ),
+              ],
               const Divider(),
-              _info('Diferencia', _signedReadable(difference)),
+              const Text(
+                'Diferencia = tiempo manual − tiempo del prototipo',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              _info(
+                'Diferencia exacta',
+                _signedReadablePreciseWithMinutes(difference),
+              ),
               if (difference != null)
                 Text(
                   difference > 0
@@ -931,9 +993,42 @@ String _readable(int? seconds) {
       : '$remainder s';
 }
 
-String _signedReadable(int? seconds) {
+String _readablePrecise(double? seconds) {
   if (seconds == null) return 'Dato no disponible';
-  return '${seconds < 0 ? '−' : ''}${_readable(seconds.abs())}';
+  return '${seconds.toStringAsFixed(3)} s';
+}
+
+String _readablePreciseWithMinutes(double seconds) {
+  final minutes = seconds ~/ 60;
+  final remainder = seconds - (minutes * 60);
+  return '${seconds.toStringAsFixed(3)} s ($minutes min ${remainder.toStringAsFixed(3)} s)';
+}
+
+String _signedReadablePreciseWithMinutes(double? seconds) {
+  if (seconds == null) return 'Dato no disponible';
+  final sign = seconds < 0
+      ? '−'
+      : seconds > 0
+      ? '+'
+      : '';
+  final absolute = seconds.abs();
+  final minutes = absolute ~/ 60;
+  final remainder = absolute - (minutes * 60);
+  return '$sign${absolute.toStringAsFixed(3)} s ($minutes min ${remainder.toStringAsFixed(3)} s)';
+}
+
+(int, String) _timeClassification(double seconds) => switch (seconds) {
+  <= 30 => (5, 'Muy rápido'),
+  <= 60 => (4, 'Rápido'),
+  <= 120 => (3, 'Moderado'),
+  <= 180 => (2, 'Lento'),
+  _ => (1, 'Muy lento'),
+};
+
+double? _nullableDouble(Object? value) {
+  if (value == null) return null;
+  if (value is num) return value.toDouble();
+  return double.tryParse(value.toString());
 }
 
 class SoapEvaluationAdminScreen extends StatefulWidget {

@@ -30,6 +30,15 @@ class ProcessingSnapshot {
     required this.receivedSegments,
     required this.transcribedSegments,
     required this.failedSegments,
+    this.consultationCode,
+    this.processingTimeMs,
+    this.processingTimeSeconds,
+    this.processingTimeRange,
+    this.processingTimeLabel,
+    this.errorCode,
+    this.errorStage,
+    this.retryCount = 0,
+    this.soapGenerated = false,
     this.soap,
   });
 
@@ -43,10 +52,22 @@ class ProcessingSnapshot {
   final int receivedSegments;
   final int transcribedSegments;
   final int failedSegments;
+  final String? consultationCode;
+  final int? processingTimeMs;
+  final double? processingTimeSeconds;
+  final int? processingTimeRange;
+  final String? processingTimeLabel;
+  final String? errorCode;
+  final String? errorStage;
+  final int retryCount;
+  final bool soapGenerated;
   final Map<String, dynamic>? soap;
 
   bool get isTerminal =>
-      status == 'completed' || status == 'failed' || status == 'cancelled';
+      status == 'completed' ||
+      status == 'failed' ||
+      status == 'timeout' ||
+      status == 'cancelled';
 }
 
 abstract interface class SegmentBackendClient {
