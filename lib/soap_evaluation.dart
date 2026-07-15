@@ -221,10 +221,12 @@ class SoapEvaluationScreen extends StatefulWidget {
   const SoapEvaluationScreen({
     super.key,
     required this.apiClient,
-    required this.consultation,
-  });
+    this.consultation,
+    this.initialEvaluation,
+  }) : assert(consultation != null || initialEvaluation != null);
   final ApiClient apiClient;
-  final ConsultationRecord consultation;
+  final ConsultationRecord? consultation;
+  final SoapEvaluation? initialEvaluation;
   @override
   State<SoapEvaluationScreen> createState() => _SoapEvaluationScreenState();
 }
@@ -270,6 +272,7 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (widget.apiClient.isAdmin) return;
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
       unawaited(_persistLocal());
@@ -278,12 +281,16 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
 
   Future<void> _load() async {
     try {
-      var server = await widget.apiClient.fetchSoapEvaluation(
-        widget.consultation.id,
-      );
+      var server = widget.initialEvaluation == null
+          ? await widget.apiClient.fetchSoapEvaluation(widget.consultation!.id)
+          : await widget.apiClient.fetchSoapEvaluationById(
+              widget.initialEvaluation!.id,
+            );
       final key =
           'sanare.soap_evaluation.${server.evaluatorId}.${server.consultationId}';
-      final raw = await widget.apiClient.secureStorage.read(key: key);
+      final raw = widget.apiClient.isAdmin
+          ? null
+          : await widget.apiClient.secureStorage.read(key: key);
       if (raw != null) {
         final local = SoapEvaluation.fromJson(
           jsonDecode(raw) as Map<String, dynamic>,
@@ -319,7 +326,7 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
   }
 
   void _change(String key, dynamic value) {
-    if (evaluation?.status == 'completed' && !widget.apiClient.isAdmin) return;
+    if (widget.apiClient.isAdmin || evaluation?.status == 'completed') return;
     setState(() {
       editRevision++;
       evaluation!.values[key] = value;
@@ -352,6 +359,7 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
   }
 
   Future<void> _persistLocal() async {
+    if (widget.apiClient.isAdmin) return;
     final item = evaluation;
     if (item == null) return;
     item.lastSavedAt = DateTime.now();
@@ -364,8 +372,9 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
   Future<bool> _save({bool showMessage = false}) async {
     final item = evaluation;
     if (item == null ||
+        widget.apiClient.isAdmin ||
         saving ||
-        item.status == 'completed' && !widget.apiClient.isAdmin) {
+        item.status == 'completed') {
       return true;
     }
     debounce?.cancel();
@@ -411,6 +420,7 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
   }
 
   Future<void> _complete() async {
+    if (widget.apiClient.isAdmin) return;
     final item = evaluation!;
     final missing = item.requiredFields
         .where((key) => item.values[key] == null)
@@ -508,7 +518,7 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
       );
     }
     final item = evaluation!;
-    final readOnly = item.status == 'completed' && !widget.apiClient.isAdmin;
+    final readOnly = widget.apiClient.isAdmin || item.status == 'completed';
     return PopScope(
       canPop: !saving,
       onPopInvokedWithResult: (didPop, _) {
@@ -522,7 +532,7 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
               padding: const EdgeInsets.only(right: 16),
               child: Center(
                 child: Text(
-                  saveState,
+                  widget.apiClient.isAdmin ? 'Solo lectura' : saveState,
                   style: TextStyle(
                     fontSize: 12,
                     color: saveState.startsWith('Sin')
@@ -537,6 +547,13 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
         body: Column(
           children: [
             LinearProgressIndicator(value: item.progress),
+            if (widget.apiClient.isAdmin)
+              const MaterialBanner(
+                content: Text(
+                  'Vista administrativa: esta evaluación pertenece al doctor y no puede modificarse.',
+                ),
+                actions: [SizedBox.shrink()],
+              ),
             _sectionTabs(),
             Expanded(
               child: SingleChildScrollView(
@@ -548,37 +565,38 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
                 ),
               ),
             ),
-            SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: saving || readOnly
-                            ? null
-                            : () => _save(showMessage: true),
-                        child: const Text('Guardar borrador'),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: FilledButton(
-                        onPressed: completing || readOnly ? null : _complete,
-                        child: Text(
-                          readOnly
-                              ? 'Completada'
-                              : completing
-                              ? 'Finalizando…'
-                              : 'Finalizar evaluación',
+            if (!widget.apiClient.isAdmin)
+              SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: saving || readOnly
+                              ? null
+                              : () => _save(showMessage: true),
+                          child: const Text('Guardar borrador'),
                         ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: completing || readOnly ? null : _complete,
+                          child: Text(
+                            readOnly
+                                ? 'Completada'
+                                : completing
+                                ? 'Finalizando…'
+                                : 'Finalizar evaluación',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -1073,6 +1091,14 @@ class _SoapEvaluationAdminScreenState extends State<SoapEvaluationAdminScreen> {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Card(
                           child: ListTile(
+                            onTap: () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => SoapEvaluationScreen(
+                                  apiClient: widget.apiClient,
+                                  initialEvaluation: item,
+                                ),
+                              ),
+                            ),
                             title: Text(
                               item.code,
                               style: const TextStyle(

@@ -4533,6 +4533,11 @@ class ApiClient implements SegmentBackendClient {
     return SoapEvaluation.fromJson(data['evaluation'] as Map<String, dynamic>);
   }
 
+  Future<SoapEvaluation> fetchSoapEvaluationById(int evaluationId) async {
+    final data = await _get('/soap-evaluations/$evaluationId');
+    return SoapEvaluation.fromJson(data['evaluation'] as Map<String, dynamic>);
+  }
+
   Future<SoapEvaluation> saveSoapEvaluation(
     SoapEvaluation evaluation, {
     bool complete = false,
