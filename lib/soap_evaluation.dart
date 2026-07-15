@@ -87,8 +87,20 @@ class SoapEvaluation {
         ? json['consultation'] as Map<String, dynamic>
         : const <String, dynamic>{};
     final legacyErrorScale = json['error_scale_version'] != 2;
+    final legacySoapScale = json['soap_scale_version'] != 2;
+    const soapScaleFields = {
+      'soap_subjective',
+      'soap_objective',
+      'soap_assessment',
+      'soap_plan',
+      'soap_placement',
+      'soap_clarity',
+    };
     dynamic editableValue(String key) {
       final value = json[key];
+      if (legacySoapScale && soapScaleFields.contains(key) && value is num) {
+        return const {0: 1, 1: 2, 2: 3}[value.toInt()] ?? value;
+      }
       if (!legacyErrorScale || !key.startsWith('error_') || value is! num) {
         return value;
       }
@@ -141,6 +153,7 @@ class SoapEvaluation {
     'ai_time_seconds': aiSeconds,
     'last_saved_at': lastSavedAt?.toIso8601String(),
     'error_scale_version': 2,
+    'soap_scale_version': 2,
     ...values,
   };
 
@@ -690,7 +703,7 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
       'soap_clarity': 'La información se presenta clara y ordenada.',
     },
     evaluation!.hasSoap
-        ? const {0: 'No cumple', 1: 'Cumple parcialmente', 2: 'Cumple'}
+        ? const {1: 'No cumple', 2: 'Cumple parcialmente', 3: 'Cumple'}
         : const {98: 'No aplica: no se generó SOAP'},
   );
   List<Widget> _errorSection() => [
