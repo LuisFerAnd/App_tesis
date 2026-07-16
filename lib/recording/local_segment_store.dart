@@ -138,7 +138,7 @@ abstract interface class LocalSegmentStore {
 
   Future<List<LocalAudioSegment>> segmentsForSession(String sessionUuid);
 
-  Future<void> retryFailedSegments();
+  Future<void> retryFailedSegments(String sessionUuid);
 
   Future<void> updateSegmentUpload(
     int id,
@@ -448,7 +448,7 @@ class SqliteLocalSegmentStore implements LocalSegmentStore {
   }
 
   @override
-  Future<void> retryFailedSegments() async {
+  Future<void> retryFailedSegments(String sessionUuid) async {
     final db = await _db;
     await db.update(
       'audio_segments',
@@ -457,8 +457,8 @@ class SqliteLocalSegmentStore implements LocalSegmentStore {
         'retry_count': 0,
         'next_attempt_at': null,
       },
-      where: 'upload_status = ?',
-      whereArgs: [SegmentUploadStatus.failed.name],
+      where: 'session_uuid = ? AND upload_status = ?',
+      whereArgs: [sessionUuid, SegmentUploadStatus.failed.name],
     );
   }
 

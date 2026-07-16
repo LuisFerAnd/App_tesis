@@ -267,6 +267,7 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
   bool loading = true;
   bool saving = false;
   bool completing = false;
+  bool retrying = false;
   String saveState = 'Guardado';
   Timer? debounce;
   int editRevision = 0;
@@ -351,6 +352,32 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
     if (consultation != null) {
       consultationMinutes.text = '${consultation ~/ 60}';
       consultationSeconds.text = '${consultation % 60}';
+    }
+  }
+
+  Future<void> _retryProcessing() async {
+    if (retrying) return;
+    setState(() => retrying = true);
+    try {
+      final uploadService = ProgressiveUploadService.instance
+        ..configure(widget.apiClient);
+      final retriedLocally = await uploadService.retryConsultation(
+        evaluation!.consultationId,
+      );
+      if (!retriedLocally) {
+        await widget.apiClient.retryProcessing(evaluation!.consultationId);
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('El procesamiento se inició nuevamente.')),
+      );
+      Navigator.of(context).pop(true);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo iniciar el reintento: $error')),
+      );
+      setState(() => retrying = false);
     }
   }
 
@@ -582,6 +609,28 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
                   'Vista administrativa: esta evaluación pertenece al doctor y no puede modificarse.',
                 ),
                 actions: [SizedBox.shrink()],
+              ),
+            if (!widget.apiClient.isAdmin &&
+                (item.overallStatus == 'failed' ||
+                    item.overallStatus == 'timeout'))
+              MaterialBanner(
+                content: Text(
+                  item.failureMessage ??
+                      'No se pudo completar el procesamiento de esta consulta.',
+                ),
+                leading: const Icon(Icons.error_outline),
+                actions: [
+                  FilledButton.icon(
+                    onPressed: retrying ? null : _retryProcessing,
+                    icon: retrying
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.refresh),
+                    label: Text(retrying ? 'Reintentando…' : 'Reintentar'),
+                  ),
+                ],
               ),
             _sectionTabs(),
             Expanded(

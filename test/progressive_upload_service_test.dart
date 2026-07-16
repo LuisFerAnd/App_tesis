@@ -96,6 +96,38 @@ void main() {
     expect(store.segments.single.uploadStatus, SegmentUploadStatus.uploaded);
   });
 
+  test('no reactiva automáticamente un segmento que ya falló', () async {
+    await begin();
+    store.segments.add(
+      segment(status: SegmentUploadStatus.failed, path: '/failed.m4a'),
+    );
+
+    connectivity.emit(true);
+    await settle();
+
+    expect(store.segments.single.uploadStatus, SegmentUploadStatus.failed);
+    expect(backend.uploaded, isEmpty);
+  });
+
+  test('reactiva una consulta fallida solamente por acción manual', () async {
+    await begin();
+    final file = await audio('manual_retry.m4a');
+    store.segments.add(
+      segment(status: SegmentUploadStatus.failed, path: file.path),
+    );
+    await store.setProcessingStatus(
+      '550e8400-e29b-41d4-a716-446655440000',
+      'failed',
+    );
+
+    final retried = await service.retryConsultation(41);
+
+    expect(retried, isTrue);
+    expect(store.segments.single.uploadStatus, SegmentUploadStatus.uploaded);
+    expect(backend.retriedConsultationId, 41);
+    expect(store.sessions.single.processingStatus, 'transcribing');
+  });
+
   test(
     'crea código local offline y lo sincroniza sin cambiar el UUID',
     () async {
@@ -474,9 +506,10 @@ class MemorySegmentStore implements LocalSegmentStore {
   ) async => segments.where((item) => item.sessionUuid == sessionUuid).toList();
 
   @override
-  Future<void> retryFailedSegments() async {
+  Future<void> retryFailedSegments(String sessionUuid) async {
     for (var index = 0; index < segments.length; index++) {
-      if (segments[index].uploadStatus == SegmentUploadStatus.failed) {
+      if (segments[index].sessionUuid == sessionUuid &&
+          segments[index].uploadStatus == SegmentUploadStatus.failed) {
         segments[index] = copySegment(
           segments[index],
           status: SegmentUploadStatus.pending,
@@ -570,6 +603,7 @@ class FakeSegmentBackend implements SegmentBackendClient {
   String? receivedLocalCode;
   bool? receivedCreatedOffline;
   int? cancelledConsultationId;
+  int? retriedConsultationId;
   ProcessingSnapshot snapshot = const ProcessingSnapshot(
     consultationId: 41,
     sessionUuid: '550e8400-e29b-41d4-a716-446655440000',
@@ -622,7 +656,9 @@ class FakeSegmentBackend implements SegmentBackendClient {
       snapshot;
 
   @override
-  Future<void> retryProcessing(int consultationId) async {}
+  Future<void> retryProcessing(int consultationId) async {
+    retriedConsultationId = consultationId;
+  }
 
   @override
   Future<void> cancelProcessing(int consultationId) async {

@@ -1046,11 +1046,19 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   Future<void> _resumePendingProcessing() async {
     final sessions = await uploadService.recoverableSessions();
     if (!mounted || sessions.isEmpty) return;
-    final pending = sessions.firstWhere(
-      (session) => session.recordingStatus == 'finished',
-      orElse: () => sessions.first,
+    final pendingSessions = sessions.where(
+      (session) =>
+          session.recordingStatus == 'finished' &&
+          !const {
+            'completed',
+            'failed',
+            'timeout',
+            'cancelled',
+            'discarded',
+          }.contains(session.processingStatus),
     );
-    if (pending.recordingStatus != 'finished') return;
+    if (pendingSessions.isEmpty) return;
+    final pending = pendingSessions.first;
     setState(() => isGeneratingSummary = true);
     _startProcessingPolling(pending.sessionUuid);
   }
@@ -1368,23 +1376,34 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
         ),
       );
     } else {
-      setState(() => isGeneratingSummary = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(snapshot.message)));
+      await recordingService.discardRecoveredSession();
+      if (!mounted) return;
+      setState(() {
+        isGeneratingSummary = false;
+        recordingDuration = Duration.zero;
+        recordingPath = null;
+        recordingPaths = <String>[];
+        consultationStartedAt = null;
+        recordingSavedAt = null;
+        generatedPdfPath = null;
+        pdfGenerationDuration = null;
+        generatedTranscript = null;
+        generatedSoapNote = null;
+        savedConsultationId = null;
+        isConsultationSaved = false;
+      });
+      processingSnapshotNotifier.value = null;
+      processingSessionUuid = null;
+      await _clearDraft();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${snapshot.message} La pantalla quedó limpia. Para reintentar, abre la consulta fallida desde el paciente.',
+          ),
+        ),
+      );
     }
-  }
-
-  Future<void> _retryPendingProcessing() async {
-    await uploadService.retryNow();
-    final sessionUuid = processingSessionUuid ?? recordingService.sessionId;
-    if (!mounted || sessionUuid == null) return;
-    processingSnapshotNotifier.value = null;
-    processingStopwatch
-      ..reset()
-      ..start();
-    setState(() => isGeneratingSummary = true);
-    _startProcessingPolling(sessionUuid);
   }
 
   Future<void> _cancelPendingProcessing() async {
@@ -1823,11 +1842,6 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
                     localElapsed: processingStopwatch.elapsed,
                     officialSeconds: snapshot?.processingTimeSeconds,
                     classification: snapshot?.processingTimeLabel,
-                    onRetry:
-                        snapshot?.status == 'failed' ||
-                            snapshot?.status == 'timeout'
-                        ? _retryPendingProcessing
-                        : null,
                     onCancel: isGeneratingSummary
                         ? _cancelPendingProcessing
                         : null,
@@ -2375,24 +2389,6 @@ class _PatientDetailScreenState extends State<PatientDetailScreen> {
     }
   }
 
-  Future<void> _retryProcessing(ConsultationRecord consultation) async {
-    try {
-      await widget.apiClient.retryProcessing(consultation.id);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('El procesamiento se volverá a intentar.'),
-        ),
-      );
-      _refreshConsultations();
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo iniciar el reintento: $error')),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
@@ -2447,7 +2443,6 @@ class _PatientDetailScreenState extends State<PatientDetailScreen> {
                         isDownloading:
                             generatingPdfConsultationId == consultation.id,
                         onDownloadPdf: () => _downloadPdf(consultation),
-                        onRetry: () => _retryProcessing(consultation),
                         onEvaluate: () => Navigator.of(context)
                             .push(
                               MaterialPageRoute<void>(
@@ -3584,14 +3579,12 @@ class PatientConsultationCard extends StatelessWidget {
     required this.isDownloading,
     required this.onDownloadPdf,
     required this.onEvaluate,
-    required this.onRetry,
   });
 
   final ConsultationRecord consultation;
   final bool isDownloading;
   final VoidCallback onDownloadPdf;
   final VoidCallback onEvaluate;
-  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -3678,7 +3671,12 @@ class PatientConsultationCard extends StatelessWidget {
                     child: FilledButton.icon(
                       onPressed: onEvaluate,
                       icon: const Icon(Icons.fact_check_outlined),
-                      label: const Text('Evaluar'),
+                      label: Text(
+                        consultation.overallStatus == 'failed' ||
+                                consultation.overallStatus == 'timeout'
+                            ? 'Abrir consulta'
+                            : 'Evaluar',
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -3699,17 +3697,6 @@ class PatientConsultationCard extends StatelessWidget {
                   ),
                 ],
               ),
-              if (consultation.overallStatus == 'failed') ...[
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: onRetry,
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Reintentar procesamiento'),
-                  ),
-                ),
-              ],
             ],
           ),
         ),

@@ -357,25 +357,24 @@ class ProgressiveUploadService extends ChangeNotifier {
     }
   }
 
-  Future<void> retryNow() async {
-    await _store.retryFailedSegments();
+  Future<bool> retryConsultation(int consultationId) async {
+    await initialize();
+    final sessions = await _store.recoverableSessions();
+    final matches = sessions.where(
+      (session) => session.consultationId == consultationId,
+    );
+    if (matches.isEmpty) return false;
+
+    final session = matches.first;
+    _cancelledSessions.remove(session.sessionUuid);
+    await _store.retryFailedSegments(session.sessionUuid);
     _retryTimer?.cancel();
     await processPending();
     final client = _client;
-    if (client == null) return;
-    for (final session in await _store.recoverableSessions()) {
-      if (session.consultationId != null &&
-          session.processingStatus == 'failed') {
-        try {
-          await client.retryProcessing(session.consultationId!);
-          await _store.setProcessingStatus(session.sessionUuid, 'transcribing');
-        } catch (error) {
-          debugPrint(
-            '[RecordingUpload] Processing retry failed: ${error.runtimeType}',
-          );
-        }
-      }
-    }
+    if (client == null) return false;
+    await client.retryProcessing(consultationId);
+    await _store.setProcessingStatus(session.sessionUuid, 'transcribing');
+    return true;
   }
 
   Future<void> cancelSession(String sessionUuid) async {
@@ -543,7 +542,6 @@ class ProgressiveUploadService extends ChangeNotifier {
   }
 
   Future<void> _resumeAfterConnectivity() async {
-    await _store.retryFailedSegments();
     await processPending();
     final sessions = await _store.recoverableSessions();
     for (final session in sessions) {
