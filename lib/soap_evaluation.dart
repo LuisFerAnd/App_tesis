@@ -134,6 +134,7 @@ class SoapEvaluation {
       aiSeconds: (json['ai_time_seconds'] as num?)?.toInt(),
       prototypeSeconds:
           _nullableDouble(consultation['processing_time_seconds']) ??
+          _nullableDouble(json['prototype_time_seconds']) ??
           _nullableDouble(json['ai_time_seconds']),
       prototypeTimeRange: (consultation['processing_time_range'] as num?)
           ?.toInt(),
@@ -174,6 +175,7 @@ class SoapEvaluation {
     'version': version,
     'audio_duration_seconds': audioSeconds,
     'ai_time_seconds': aiSeconds,
+    'prototype_time_seconds': prototypeSeconds,
     'manual_time_range': manualTimeRange,
     'manual_time_label': manualTimeLabel,
     'time_difference_seconds': timeDifferenceSeconds,
@@ -854,6 +856,13 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
     final ai = evaluation!.prototypeSeconds;
     final manual = (evaluation!.values['manual_time_seconds'] as num?)?.toInt();
     final difference = ai == null || manual == null ? null : manual - ai;
+    final savingsPercentage =
+        difference == null || manual == null || manual <= 0
+        ? null
+        : (difference / manual) * 100;
+    final savingsClassification = savingsPercentage == null
+        ? null
+        : _timeSavingsClassification(savingsPercentage);
     final manualClassification = manual == null
         ? null
         : _timeClassification(manual.toDouble());
@@ -873,9 +882,14 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
               ),
               const SizedBox(height: 12),
               const Text(
-                'Tiempo manual estimado',
+                'Tiempo empleado en la elaboración manual',
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
+              const SizedBox(height: 4),
+              const Text(
+                'Cronometre desde el inicio de la elaboración manual hasta obtener el documento SOAP terminado.',
+              ),
+              const SizedBox(height: 8),
               _durationInputs(
                 manualMinutes,
                 manualSeconds,
@@ -905,6 +919,12 @@ class _SoapEvaluationScreenState extends State<SoapEvaluationScreen>
                 'Diferencia exacta',
                 _signedReadablePreciseWithMinutes(difference),
               ),
+              _info('Ahorro porcentual', _signedPercentage(savingsPercentage)),
+              if (savingsClassification != null)
+                _info(
+                  'Clasificación del ahorro',
+                  '${savingsClassification.$1} · ${savingsClassification.$2}',
+                ),
               if (difference != null)
                 Text(
                   difference > 0
@@ -1024,6 +1044,21 @@ String _signedReadablePreciseWithMinutes(double? seconds) {
   <= 180 => (2, 'Lento'),
   _ => (1, 'Muy lento'),
 };
+
+(int, String) _timeSavingsClassification(double percentage) =>
+    switch (percentage) {
+      < -25 => (1, 'Pérdida considerable'),
+      < -5 => (2, 'Pérdida leve'),
+      <= 5 => (3, 'Sin cambio relevante'),
+      <= 25 => (4, 'Ahorro moderado'),
+      _ => (5, 'Ahorro considerable'),
+    };
+
+String _signedPercentage(double? percentage) {
+  if (percentage == null) return 'Dato no disponible';
+  final sign = percentage > 0 ? '+' : '';
+  return '$sign${percentage.toStringAsFixed(2)} %';
+}
 
 double? _nullableDouble(Object? value) {
   if (value == null) return null;
