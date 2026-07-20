@@ -34,7 +34,7 @@ void main() {
     return file;
   }
 
-  Future<void> begin() => service.beginSession(
+  Future<bool> begin() => service.beginSession(
     sessionUuid: '550e8400-e29b-41d4-a716-446655440000',
     patientId: 9,
     startedAt: DateTime(2026, 7, 13, 10),
@@ -77,24 +77,46 @@ void main() {
     expect(store.segments.single.uploadStatus, SegmentUploadStatus.pending);
   });
 
-  test('reanuda automáticamente cuando vuelve Internet', () async {
-    connectivity.connected = false;
-    await begin();
-    final file = await audio('offline.m4a');
-    await service.registerSegment(
-      sessionUuid: '550e8400-e29b-41d4-a716-446655440000',
-      segmentNumber: 1,
-      localPath: file.path,
-      duration: const Duration(seconds: 60),
-      isFinal: false,
-    );
-    expect(store.segments.single.uploadStatus, SegmentUploadStatus.pending);
+  test(
+    'marca como fallida una grabación finalizada sin consulta remota',
+    () async {
+      store.sessions.add(
+        LocalRecordingSession(
+          sessionUuid: '550e8400-e29b-41d4-a716-446655440000',
+          patientId: 9,
+          startedAt: DateTime(2026, 7, 13, 10),
+          recordingStatus: 'finished',
+          processingStatus: 'uploading',
+          expectedSegments: 1,
+        ),
+      );
+      store.segments.add(
+        segment(status: SegmentUploadStatus.pending, path: '/orphan.m4a'),
+      );
 
-    connectivity.emit(true);
-    await settle();
+      await service.initialize();
 
-    expect(store.segments.single.uploadStatus, SegmentUploadStatus.uploaded);
-  });
+      expect(store.sessions.single.processingStatus, 'failed');
+      expect(store.segments.single.uploadStatus, SegmentUploadStatus.failed);
+      expect(await service.recoverableSessions(), isEmpty);
+    },
+  );
+
+  test(
+    'no inicia ni recupera automáticamente una consulta sin conexión',
+    () async {
+      connectivity.connected = false;
+      final started = await begin();
+
+      connectivity.emit(true);
+      await settle();
+
+      expect(started, isFalse);
+      expect(store.sessions.single.processingStatus, 'failed');
+      expect(await service.recoverableSessions(), isEmpty);
+      expect(backend.receivedLocalCode, isNull);
+    },
+  );
 
   test('no reactiva automáticamente un segmento que ya falló', () async {
     await begin();
@@ -127,26 +149,6 @@ void main() {
     expect(backend.retriedConsultationId, 41);
     expect(store.sessions.single.processingStatus, 'transcribing');
   });
-
-  test(
-    'crea código local offline y lo sincroniza sin cambiar el UUID',
-    () async {
-      connectivity.connected = false;
-      await begin();
-      final local = store.sessions.single;
-      expect(local.localConsultationCode, startsWith('LOCAL-'));
-      expect(local.processingStatus, 'pending_sync');
-
-      connectivity.emit(true);
-      await settle();
-
-      final synced = store.sessions.single;
-      expect(backend.receivedLocalCode, local.localConsultationCode);
-      expect(backend.receivedCreatedOffline, isTrue);
-      expect(synced.consultationCode, 'C-13-07-2026-000041');
-      expect(synced.sessionUuid, local.sessionUuid);
-    },
-  );
 
   test(
     'conserva localmente el fallo aunque el servidor no esté disponible',
@@ -296,6 +298,19 @@ void main() {
     expect(sessions.single.expectedSegments, 2);
   });
 
+  test('no recupera una consulta cuyo procesamiento fallo', () async {
+    await begin();
+    await store.finishSession('550e8400-e29b-41d4-a716-446655440000', 2);
+    await store.setProcessingStatus(
+      '550e8400-e29b-41d4-a716-446655440000',
+      'failed',
+    );
+
+    final sessions = await service.recoverableSessions();
+
+    expect(sessions, isEmpty);
+  });
+
   test('cancela los envíos pendientes sin borrar el audio local', () async {
     await begin();
     connectivity.connected = false;
@@ -370,8 +385,19 @@ class MemorySegmentStore implements LocalSegmentStore {
   }
 
   @override
-  Future<List<LocalRecordingSession>> recoverableSessions() async =>
-      sessions.where((item) => item.processingStatus != 'completed').toList();
+  Future<LocalRecordingSession?> sessionForConsultation(
+    int consultationId,
+  ) async {
+    final matches = sessions.where(
+      (item) => item.consultationId == consultationId,
+    );
+    return matches.isEmpty ? null : matches.first;
+  }
+
+  @override
+  Future<List<LocalRecordingSession>> recoverableSessions() async => sessions
+      .where((item) => !isTerminalProcessingStatus(item.processingStatus))
+      .toList();
 
   @override
   Future<void> setRemoteConsultation(
@@ -468,6 +494,14 @@ class MemorySegmentStore implements LocalSegmentStore {
         failureMessage: message,
       ),
     );
+    for (var index = 0; index < segments.length; index++) {
+      final item = segments[index];
+      if (item.sessionUuid == sessionUuid &&
+          (item.uploadStatus == SegmentUploadStatus.pending ||
+              item.uploadStatus == SegmentUploadStatus.uploading)) {
+        segments[index] = copySegment(item, status: SegmentUploadStatus.failed);
+      }
+    }
   }
 
   @override

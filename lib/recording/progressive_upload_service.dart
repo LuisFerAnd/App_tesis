@@ -164,6 +164,17 @@ class ProgressiveUploadService extends ChangeNotifier {
     _initialized = true;
     await _store.initialize();
     await _store.recoverInterruptedUploads();
+    final interruptedSessions = await _store.recoverableSessions();
+    for (final session in interruptedSessions) {
+      if (session.recordingStatus == 'finished' &&
+          session.consultationId == null) {
+        await _store.setSessionFailure(
+          session.sessionUuid,
+          'connection',
+          'La consulta no pudo registrarse en el servidor.',
+        );
+      }
+    }
     _connectivity.changes.listen((connected) {
       if (!connected) {
         _message =
@@ -177,7 +188,7 @@ class ProgressiveUploadService extends ChangeNotifier {
     unawaited(processPending());
   }
 
-  Future<void> beginSession({
+  Future<bool> beginSession({
     required String sessionUuid,
     required int patientId,
     required DateTime startedAt,
@@ -194,7 +205,23 @@ class ProgressiveUploadService extends ChangeNotifier {
         localConsultationCode: _localCode(startedAt, sessionUuid),
       ),
     );
-    await _ensureRemoteSession(sessionUuid);
+    final remote = await _ensureRemoteSession(
+      sessionUuid,
+      retryAutomatically: false,
+    );
+    if (remote != null) return true;
+
+    _retryTimer?.cancel();
+    _cancelledSessions.add(sessionUuid);
+    await _store.setSessionFailure(
+      sessionUuid,
+      'connection',
+      'No se pudo registrar la consulta en el servidor.',
+    );
+    _message =
+        'No se pudo iniciar la consulta porque el servidor no está disponible.';
+    notifyListeners();
+    return false;
   }
 
   String _localCode(DateTime startedAt, String sessionUuid) {
@@ -359,13 +386,8 @@ class ProgressiveUploadService extends ChangeNotifier {
 
   Future<bool> retryConsultation(int consultationId) async {
     await initialize();
-    final sessions = await _store.recoverableSessions();
-    final matches = sessions.where(
-      (session) => session.consultationId == consultationId,
-    );
-    if (matches.isEmpty) return false;
-
-    final session = matches.first;
+    final session = await _store.sessionForConsultation(consultationId);
+    if (session == null) return false;
     _cancelledSessions.remove(session.sessionUuid);
     await _store.retryFailedSegments(session.sessionUuid);
     _retryTimer?.cancel();
@@ -404,15 +426,20 @@ class ProgressiveUploadService extends ChangeNotifier {
     try {
       final snapshot = await client.processingStatus(session!.consultationId!);
       await _store.setProcessingStatus(sessionUuid, snapshot.status);
-      _message = snapshot.message;
-      notifyListeners();
+      if (_message != snapshot.message) {
+        _message = snapshot.message;
+        notifyListeners();
+      }
       return snapshot;
     } catch (error) {
-      _message =
+      const failureMessage =
           'No se pudo consultar el servidor. El audio permanece guardado y '
           'se volverá a intentar automáticamente.';
+      if (_message != failureMessage) {
+        _message = failureMessage;
+        notifyListeners();
+      }
       debugPrint('[RecordingUpload] Status poll failed: ${error.runtimeType}');
-      notifyListeners();
       return null;
     }
   }
@@ -427,8 +454,9 @@ class ProgressiveUploadService extends ChangeNotifier {
       _store.recoverableSessions();
 
   Future<BackendRecordingSession?> _ensureRemoteSession(
-    String sessionUuid,
-  ) async {
+    String sessionUuid, {
+    bool retryAutomatically = true,
+  }) async {
     final local = await _store.session(sessionUuid);
     final client = _client;
     if (local == null || client == null) return null;
@@ -462,17 +490,20 @@ class ProgressiveUploadService extends ChangeNotifier {
       }
       return remote;
     } catch (error) {
-      _message =
-          'No se pudo conectar con el servidor. El audio permanece guardado '
-          'en el dispositivo y se volverá a intentar automáticamente.';
+      _message = retryAutomatically
+          ? 'No se pudo conectar con el servidor. El audio permanece guardado '
+                'en el dispositivo y se volverá a intentar automáticamente.'
+          : 'No se pudo registrar la consulta en el servidor.';
       debugPrint(
         '[RecordingUpload] Session start failed: ${error.runtimeType}',
       );
-      _retryTimer?.cancel();
-      _retryTimer = Timer(
-        _retryDelays.first,
-        () => unawaited(_resumeAfterConnectivity()),
-      );
+      if (retryAutomatically) {
+        _retryTimer?.cancel();
+        _retryTimer = Timer(
+          _retryDelays.first,
+          () => unawaited(_resumeAfterConnectivity()),
+        );
+      }
       notifyListeners();
       return null;
     }

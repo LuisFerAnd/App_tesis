@@ -2,6 +2,17 @@ import 'package:sqflite/sqflite.dart';
 
 enum SegmentUploadStatus { pending, uploading, uploaded, failed, cancelled }
 
+const terminalProcessingStatuses = <String>{
+  'completed',
+  'failed',
+  'timeout',
+  'cancelled',
+  'discarded',
+};
+
+bool isTerminalProcessingStatus(String status) =>
+    terminalProcessingStatuses.contains(status);
+
 class LocalRecordingSession {
   const LocalRecordingSession({
     required this.sessionUuid,
@@ -109,6 +120,8 @@ abstract interface class LocalSegmentStore {
   Future<void> saveSession(LocalRecordingSession session);
 
   Future<LocalRecordingSession?> session(String sessionUuid);
+
+  Future<LocalRecordingSession?> sessionForConsultation(int consultationId);
 
   Future<List<LocalRecordingSession>> recoverableSessions();
 
@@ -268,11 +281,28 @@ class SqliteLocalSegmentStore implements LocalSegmentStore {
   }
 
   @override
+  Future<LocalRecordingSession?> sessionForConsultation(
+    int consultationId,
+  ) async {
+    final db = await _db;
+    final rows = await db.query(
+      'recording_sessions',
+      where: 'consultation_id = ?',
+      whereArgs: [consultationId],
+      orderBy: 'started_at DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : LocalRecordingSession.fromMap(rows.first);
+  }
+
+  @override
   Future<List<LocalRecordingSession>> recoverableSessions() async {
     final db = await _db;
     final rows = await db.query(
       'recording_sessions',
-      where: "processing_status NOT IN ('completed', 'discarded')",
+      where:
+          "processing_status NOT IN "
+          "('completed', 'failed', 'timeout', 'cancelled', 'discarded')",
       orderBy: 'started_at DESC',
     );
     return rows.map(LocalRecordingSession.fromMap).toList();
@@ -359,16 +389,31 @@ class SqliteLocalSegmentStore implements LocalSegmentStore {
     String message,
   ) async {
     final db = await _db;
-    await db.update(
-      'recording_sessions',
-      {
-        'processing_status': 'failed',
-        'failure_stage': stage,
-        'failure_message': message,
-      },
-      where: 'session_uuid = ?',
-      whereArgs: [sessionUuid],
-    );
+    await db.transaction((transaction) async {
+      await transaction.update(
+        'recording_sessions',
+        {
+          'processing_status': 'failed',
+          'failure_stage': stage,
+          'failure_message': message,
+        },
+        where: 'session_uuid = ?',
+        whereArgs: [sessionUuid],
+      );
+      await transaction.update(
+        'audio_segments',
+        {
+          'upload_status': SegmentUploadStatus.failed.name,
+          'next_attempt_at': null,
+        },
+        where: 'session_uuid = ? AND upload_status IN (?, ?)',
+        whereArgs: [
+          sessionUuid,
+          SegmentUploadStatus.pending.name,
+          SegmentUploadStatus.uploading.name,
+        ],
+      );
+    });
   }
 
   @override

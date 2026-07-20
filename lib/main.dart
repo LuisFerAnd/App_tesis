@@ -954,7 +954,6 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   late final RecordingService recordingService;
   late final ProgressiveUploadService uploadService;
   Timer? processingPollTimer;
-  Timer? processingElapsedTimer;
   final Stopwatch processingStopwatch = Stopwatch();
   late final ValueNotifier<ProcessingSnapshot?> processingSnapshotNotifier;
   String? processingSessionUuid;
@@ -965,6 +964,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   bool isSaving = false;
   bool isGeneratingPdf = false;
   bool isConsultationSaved = false;
+  bool _processingPollInFlight = false;
   Duration recordingDuration = Duration.zero;
   Duration? pdfGenerationDuration;
   String? recordingPath;
@@ -1014,7 +1014,6 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     WidgetsBinding.instance.removeObserver(this);
     recordingService.removeListener(_onRecordingStateChanged);
     processingPollTimer?.cancel();
-    processingElapsedTimer?.cancel();
     processingSnapshotNotifier.dispose();
     super.dispose();
   }
@@ -1034,9 +1033,28 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   Future<void> _initializeScreen() async {
     await uploadService.initialize();
     final recovered = await recordingService.initialize();
-    await _restoreDraft();
+    final restoredSessionUuid = recordingService.sessionId;
+    final restoredSession = restoredSessionUuid == null
+        ? null
+        : await uploadService.session(restoredSessionUuid);
+    final previousProcessingFailed =
+        restoredSession != null &&
+        const {
+          'failed',
+          'timeout',
+          'cancelled',
+          'discarded',
+        }.contains(restoredSession.processingStatus);
+
+    if (previousProcessingFailed) {
+      await recordingService.discardRecoveredSession();
+      await _clearDraft();
+      _onRecordingStateChanged();
+    } else {
+      await _restoreDraft();
+    }
     _onRecordingStateChanged();
-    if (recovered && mounted) {
+    if (recovered && !previousProcessingFailed && mounted) {
       await _showRecoveredRecordingDialog();
     } else {
       await _resumePendingProcessing();
@@ -1049,13 +1067,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     final pendingSessions = sessions.where(
       (session) =>
           session.recordingStatus == 'finished' &&
-          !const {
-            'completed',
-            'failed',
-            'timeout',
-            'cancelled',
-            'discarded',
-          }.contains(session.processingStatus),
+          !isTerminalProcessingStatus(session.processingStatus),
     );
     if (pendingSessions.isEmpty) return;
     final pending = pendingSessions.first;
@@ -1228,11 +1240,23 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     final startedAt = DateTime.now();
     final professionalId = await widget.apiClient.professionalIdentifier();
     final sessionUuid = const Uuid().v4();
-    await uploadService.beginSession(
+    final registered = await uploadService.beginSession(
       sessionUuid: sessionUuid,
       patientId: patient.id,
       startedAt: startedAt,
     );
+    if (!registered) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No se inició la grabación porque la consulta no pudo registrarse '
+            'en el servidor. Verifica la conexión e intenta nuevamente.',
+          ),
+        ),
+      );
+      return;
+    }
     final registeredSession = await uploadService.session(sessionUuid);
     final started = await recordingService.startRecording(
       patientId: patient.id,
@@ -1328,10 +1352,6 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     if (!processingStopwatch.isRunning) processingStopwatch.start();
     processingSessionUuid = sessionUuid;
     processingPollTimer?.cancel();
-    processingElapsedTimer?.cancel();
-    processingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && isGeneratingSummary) setState(() {});
-    });
     unawaited(_pollProcessingStatus(sessionUuid));
     processingPollTimer = Timer.periodic(
       const Duration(seconds: 4),
@@ -1340,76 +1360,88 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   }
 
   Future<void> _pollProcessingStatus(String sessionUuid) async {
-    final snapshot = await uploadService.pollStatus(sessionUuid);
-    if (!mounted || snapshot == null) return;
-    processingSnapshotNotifier.value = snapshot;
-    if (!snapshot.isTerminal) return;
+    if (_processingPollInFlight) return;
+    _processingPollInFlight = true;
+    try {
+      final snapshot = await uploadService.pollStatus(sessionUuid);
+      if (!mounted || snapshot == null) return;
+      final previousSnapshot = processingSnapshotNotifier.value;
+      final visualStateChanged =
+          previousSnapshot?.status != snapshot.status ||
+          previousSnapshot?.progress != snapshot.progress ||
+          previousSnapshot?.message != snapshot.message ||
+          previousSnapshot?.failedSegments != snapshot.failedSegments;
+      if (visualStateChanged) {
+        processingSnapshotNotifier.value = snapshot;
+      }
+      if (!snapshot.isTerminal) return;
 
-    processingPollTimer?.cancel();
-    processingElapsedTimer?.cancel();
-    processingStopwatch.stop();
-    if (snapshot.status == 'completed' && snapshot.soap != null) {
-      final vitalSigns = snapshot.soap!['vital_signs'];
-      final durationSeconds = await uploadService.totalDurationSeconds(
-        sessionUuid,
-      );
-      if (!mounted) return;
-      setState(() {
-        recordingDuration = Duration(seconds: durationSeconds);
-        generatedSoapNote = SoapNote.fromDraftJson(
-          snapshot.soap!,
-          aiUsage: vitalSigns is Map<String, dynamic>
-              ? _mapFromJson(vitalSigns['ai_usage'])
-              : const {},
+      processingPollTimer?.cancel();
+      processingStopwatch.stop();
+      if (snapshot.status == 'completed' && snapshot.soap != null) {
+        final vitalSigns = snapshot.soap!['vital_signs'];
+        final durationSeconds = await uploadService.totalDurationSeconds(
+          sessionUuid,
         );
-        generatedTranscript = null;
-        savedConsultationId = snapshot.consultationId;
-        isConsultationSaved = true;
-        isGeneratingSummary = false;
-      });
-      unawaited(_persistDraft());
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Registro SOAP generado. Tiempo: ${snapshot.processingTimeSeconds?.toStringAsFixed(1) ?? '--'} s · ${snapshot.processingTimeLabel ?? 'Sin clasificación'}',
+        if (!mounted) return;
+        setState(() {
+          recordingDuration = Duration(seconds: durationSeconds);
+          generatedSoapNote = SoapNote.fromDraftJson(
+            snapshot.soap!,
+            aiUsage: vitalSigns is Map<String, dynamic>
+                ? _mapFromJson(vitalSigns['ai_usage'])
+                : const {},
+          );
+          generatedTranscript = null;
+          savedConsultationId = snapshot.consultationId;
+          isConsultationSaved = true;
+          isGeneratingSummary = false;
+        });
+        unawaited(_persistDraft());
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Registro SOAP generado. Tiempo: ${snapshot.processingTimeSeconds?.toStringAsFixed(1) ?? '--'} s · ${snapshot.processingTimeLabel ?? 'Sin clasificación'}',
+            ),
           ),
-        ),
-      );
-    } else {
-      await recordingService.discardRecoveredSession();
-      if (!mounted) return;
-      setState(() {
-        isGeneratingSummary = false;
-        recordingDuration = Duration.zero;
-        recordingPath = null;
-        recordingPaths = <String>[];
-        consultationStartedAt = null;
-        recordingSavedAt = null;
-        generatedPdfPath = null;
-        pdfGenerationDuration = null;
-        generatedTranscript = null;
-        generatedSoapNote = null;
-        savedConsultationId = null;
-        isConsultationSaved = false;
-      });
-      processingSnapshotNotifier.value = null;
-      processingSessionUuid = null;
-      await _clearDraft();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            '${snapshot.message} La pantalla quedó limpia. Para reintentar, abre la consulta fallida desde el paciente.',
+        );
+      } else {
+        await recordingService.discardRecoveredSession();
+        if (!mounted) return;
+        setState(() {
+          isGeneratingSummary = false;
+          recordingDuration = Duration.zero;
+          recordingPath = null;
+          recordingPaths = <String>[];
+          consultationStartedAt = null;
+          recordingSavedAt = null;
+          generatedPdfPath = null;
+          pdfGenerationDuration = null;
+          generatedTranscript = null;
+          generatedSoapNote = null;
+          savedConsultationId = null;
+          isConsultationSaved = false;
+        });
+        processingSnapshotNotifier.value = null;
+        processingSessionUuid = null;
+        await _clearDraft();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${snapshot.message} La pantalla quedó limpia. Para reintentar, abre la consulta fallida desde el paciente.',
+            ),
           ),
-        ),
-      );
+        );
+      }
+    } finally {
+      _processingPollInFlight = false;
     }
   }
 
   Future<void> _cancelPendingProcessing() async {
     final sessionUuid = processingSessionUuid ?? recordingService.sessionId;
     processingPollTimer?.cancel();
-    processingElapsedTimer?.cancel();
     processingStopwatch.stop();
     if (sessionUuid != null) {
       await uploadService.cancelSession(sessionUuid);
@@ -4187,14 +4219,75 @@ class ApiSession {
   bool get isAdmin => roles.contains('admin');
 }
 
+class ApiException implements Exception {
+  const ApiException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+@visibleForTesting
+Map<String, dynamic> decodeApiResponse({
+  required int statusCode,
+  required String responseBody,
+}) {
+  final trimmedBody = responseBody.trim();
+  Map<String, dynamic> body;
+
+  if (trimmedBody.isEmpty) {
+    body = <String, dynamic>{};
+  } else {
+    try {
+      final decoded = jsonDecode(trimmedBody);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('La respuesta JSON no es un objeto.');
+      }
+      body = decoded;
+    } on FormatException {
+      final isHtml =
+          trimmedBody.startsWith('<!DOCTYPE html') ||
+          trimmedBody.startsWith('<html');
+      final responseType = isHtml ? 'HTML' : 'un formato no reconocido';
+      throw ApiException(
+        'El servidor de Sanare respondio con $responseType en lugar de JSON '
+        '(HTTP $statusCode). Intenta nuevamente; si el problema continua, '
+        'verifica la configuracion de SANARE_API_URL.',
+      );
+    }
+  }
+
+  if (statusCode < 200 || statusCode >= 300) {
+    throw ApiException(
+      body['message']?.toString() ?? 'Error del servidor (HTTP $statusCode).',
+    );
+  }
+
+  return body;
+}
+
+@visibleForTesting
+String normalizeApiBaseUrl(String configuredUrl) {
+  var normalized = configuredUrl.trim();
+  while (normalized.endsWith('/')) {
+    normalized = normalized.substring(0, normalized.length - 1);
+  }
+  if (!normalized.endsWith('/api')) {
+    normalized = '$normalized/api';
+  }
+  return normalized;
+}
+
 class ApiClient implements SegmentBackendClient {
   ApiClient({FlutterSecureStorage? secureStorage})
     : secureStorage = secureStorage ?? const FlutterSecureStorage();
 
-  static const String baseUrl = String.fromEnvironment(
+  static const String _configuredBaseUrl = String.fromEnvironment(
     'SANARE_API_URL',
     defaultValue: 'https://api.sanaresys.com/api',
   );
+  static final String baseUrl = normalizeApiBaseUrl(_configuredBaseUrl);
   static const String _sessionTokenKey = 'sanare.session.token';
   static const String _sessionNameKey = 'sanare.session.doctor_name';
   static const String _sessionEmailKey = 'sanare.session.doctor_email';
@@ -4888,15 +4981,10 @@ class ApiClient implements SegmentBackendClient {
   }
 
   Map<String, dynamic> _decodeBody(int statusCode, String responseBody) {
-    final body = responseBody.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(responseBody) as Map<String, dynamic>;
-
-    if (statusCode < 200 || statusCode >= 300) {
-      throw Exception(body['message']?.toString() ?? 'HTTP $statusCode');
-    }
-
-    return body;
+    return decodeApiResponse(
+      statusCode: statusCode,
+      responseBody: responseBody,
+    );
   }
 }
 
