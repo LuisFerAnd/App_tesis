@@ -149,9 +149,11 @@ class ProgressiveUploadService extends ChangeNotifier {
   bool _processing = false;
   final Set<String> _cancelledSessions = <String>{};
   String? _message;
+  String? _sessionStartError;
   int _pendingCount = 0;
 
   String? get message => _message;
+  String? get sessionStartError => _sessionStartError;
   int get pendingCount => _pendingCount;
   bool get isUploading => _processing;
 
@@ -194,6 +196,7 @@ class ProgressiveUploadService extends ChangeNotifier {
     required DateTime startedAt,
   }) async {
     await initialize();
+    _sessionStartError = null;
     final connected = await _connectivity.isConnected();
     await _store.saveSession(
       LocalRecordingSession(
@@ -490,6 +493,10 @@ class ProgressiveUploadService extends ChangeNotifier {
       }
       return remote;
     } catch (error) {
+      if (!retryAutomatically) {
+        final detail = error.toString().trim();
+        _sessionStartError = detail.isEmpty ? null : detail;
+      }
       _message = retryAutomatically
           ? 'No se pudo conectar con el servidor. El audio permanece guardado '
                 'en el dispositivo y se volverá a intentar automáticamente.'

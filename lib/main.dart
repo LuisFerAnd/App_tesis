@@ -961,6 +961,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
   DateTime? recordingSavedAt;
   Patient? selectedPatient;
   bool isGeneratingSummary = false;
+  bool isStartingRecording = false;
   bool isSaving = false;
   bool isGeneratingPdf = false;
   bool isConsultationSaved = false;
@@ -1234,73 +1235,126 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     return widget.apiClient.secureStorage.delete(key: _draftKey);
   }
 
+  bool get _hasPreviousConsultationData =>
+      recordingPath != null ||
+      recordingPaths.isNotEmpty ||
+      generatedSoapNote != null ||
+      generatedTranscript != null ||
+      generatedPdfPath != null ||
+      savedConsultationId != null ||
+      consultationStartedAt != null;
+
+  Future<bool> _confirmNewRecording(Patient patient) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('¿Iniciar otra grabación?'),
+        content: Text(
+          'Ya hay una consulta en esta pantalla. Si continúas, se preparará '
+          'una nueva consulta para ${patient.name}. La consulta anterior '
+          'permanecerá guardada.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(context, true),
+            icon: const Icon(Icons.mic_none),
+            label: const Text('Grabar nueva'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
   Future<void> _startRecording() async {
     final patient = selectedPatient;
-    if (patient == null || recordingService.controlsLocked) return;
-    final startedAt = DateTime.now();
-    final professionalId = await widget.apiClient.professionalIdentifier();
-    final sessionUuid = const Uuid().v4();
-    final registered = await uploadService.beginSession(
-      sessionUuid: sessionUuid,
-      patientId: patient.id,
-      startedAt: startedAt,
-    );
-    if (!registered) {
+    if (patient == null ||
+        recordingService.controlsLocked ||
+        isStartingRecording) {
+      return;
+    }
+    if (_hasPreviousConsultationData) {
+      final confirmed = await _confirmNewRecording(patient);
+      if (!confirmed || !mounted) return;
+      await _newConsultation();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'No se inició la grabación porque la consulta no pudo registrarse '
-            'en el servidor. Verifica la conexión e intenta nuevamente.',
-          ),
-        ),
-      );
-      return;
     }
-    final registeredSession = await uploadService.session(sessionUuid);
-    final started = await recordingService.startRecording(
-      patientId: patient.id,
-      professionalId: professionalId,
-      sessionUuid: sessionUuid,
-      consultationCode:
-          registeredSession?.consultationCode ??
-          registeredSession?.localConsultationCode,
-    );
-    if (!mounted) return;
-    if (!started) {
-      await uploadService.recordFailure(
+    setState(() => isStartingRecording = true);
+    try {
+      final startedAt = DateTime.now();
+      final professionalId = await widget.apiClient.professionalIdentifier();
+      final sessionUuid = const Uuid().v4();
+      final registered = await uploadService.beginSession(
         sessionUuid: sessionUuid,
-        stage: 'recording',
-        code: 'MICROPHONE_START_FAILED',
-        message: 'No se pudo iniciar la grabación.',
+        patientId: patient.id,
+        startedAt: startedAt,
       );
-      _showRecordingError();
-      return;
-    }
-    setState(() {
-      isGeneratingSummary = false;
-      isConsultationSaved = false;
-      savedConsultationId = null;
-      consultationStartedAt = startedAt;
-      recordingSavedAt = null;
-      recordingDuration = Duration.zero;
-      recordingPaths = recordingService.segments;
-      recordingPath = recordingService.primaryPath;
-      generatedPdfPath = null;
-      pdfGenerationDuration = null;
-      generatedTranscript = null;
-      generatedSoapNote = null;
-    });
-    unawaited(_persistDraft());
-    if (!await recordingService.notificationsEnabled() && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Las notificaciones están desactivadas. La grabación continúa, '
-            'pero conviene habilitarlas para ver el indicador persistente.',
+      if (!registered) {
+        if (!mounted) return;
+        final detail = uploadService.sessionStartError;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              detail == null
+                  ? 'No se inició la grabación porque la consulta no pudo '
+                        'registrarse en el servidor. Intenta nuevamente.'
+                  : 'No se inició la grabación: $detail',
+            ),
           ),
-        ),
+        );
+        return;
+      }
+      final registeredSession = await uploadService.session(sessionUuid);
+      final started = await recordingService.startRecording(
+        patientId: patient.id,
+        professionalId: professionalId,
+        sessionUuid: sessionUuid,
+        consultationCode:
+            registeredSession?.consultationCode ??
+            registeredSession?.localConsultationCode,
       );
+      if (!mounted) return;
+      if (!started) {
+        await uploadService.recordFailure(
+          sessionUuid: sessionUuid,
+          stage: 'recording',
+          code: 'MICROPHONE_START_FAILED',
+          message: 'No se pudo iniciar la grabación.',
+        );
+        _showRecordingError();
+        return;
+      }
+      setState(() {
+        isGeneratingSummary = false;
+        isConsultationSaved = false;
+        savedConsultationId = null;
+        consultationStartedAt = startedAt;
+        recordingSavedAt = null;
+        recordingDuration = Duration.zero;
+        recordingPaths = recordingService.segments;
+        recordingPath = recordingService.primaryPath;
+        generatedPdfPath = null;
+        pdfGenerationDuration = null;
+        generatedTranscript = null;
+        generatedSoapNote = null;
+      });
+      unawaited(_persistDraft());
+      if (!await recordingService.notificationsEnabled() && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Las notificaciones están desactivadas. La grabación continúa, '
+              'pero conviene habilitarlas para ver el indicador persistente.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => isStartingRecording = false);
     }
   }
 
@@ -1364,7 +1418,11 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     _processingPollInFlight = true;
     try {
       final snapshot = await uploadService.pollStatus(sessionUuid);
-      if (!mounted || snapshot == null) return;
+      if (!mounted ||
+          snapshot == null ||
+          processingSessionUuid != sessionUuid) {
+        return;
+      }
       final previousSnapshot = processingSnapshotNotifier.value;
       final visualStateChanged =
           previousSnapshot?.status != snapshot.status ||
@@ -1513,6 +1571,11 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     }
 
     if (!mounted) return;
+    processingPollTimer?.cancel();
+    processingSessionUuid = null;
+    processingStopwatch
+      ..stop()
+      ..reset();
     setState(() {
       isGeneratingSummary = false;
       recordingDuration = Duration.zero;
@@ -1527,7 +1590,6 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       isConsultationSaved = false;
       savedConsultationId = null;
     });
-    processingStopwatch.reset();
     processingSnapshotNotifier.value = null;
     await _clearDraft();
   }
@@ -1781,7 +1843,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
       actions: [
         IconButton(
           tooltip: 'Nueva consulta',
-          onPressed: _newConsultation,
+          onPressed: isStartingRecording ? null : _newConsultation,
           icon: const Icon(Icons.add_circle_outline),
         ),
       ],
@@ -1791,6 +1853,11 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
           PatientSelector(
             selectedPatient: patient,
             apiClient: widget.apiClient,
+            selectionEnabled:
+                !isRecording &&
+                !recordingService.controlsLocked &&
+                !isStartingRecording &&
+                !isGeneratingSummary,
             onSelected: (patient) {
               setState(() {
                 selectedPatient = patient;
@@ -1819,7 +1886,8 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
                   audioDuration: liveDuration,
                   audioPath: recordingPath,
                   segmentCount: recordingPaths.length,
-                  onToggle: recordingService.controlsLocked
+                  onToggle:
+                      recordingService.controlsLocked || isStartingRecording
                       ? null
                       : _toggleRecording,
                   onPause:
@@ -2503,11 +2571,13 @@ class PatientSelector extends StatelessWidget {
     required this.selectedPatient,
     required this.apiClient,
     required this.onSelected,
+    this.selectionEnabled = true,
   });
 
   final Patient? selectedPatient;
   final ApiClient apiClient;
   final ValueChanged<Patient> onSelected;
+  final bool selectionEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -2580,9 +2650,11 @@ class PatientSelector extends StatelessWidget {
                             ),
                           )
                           .toList(),
-                      onChanged: (patient) {
-                        if (patient != null) onSelected(patient);
-                      },
+                      onChanged: selectionEnabled
+                          ? (patient) {
+                              if (patient != null) onSelected(patient);
+                            }
+                          : null,
                     ),
                     const SizedBox(height: 12),
                     InfoPill(icon: Icons.badge_outlined, text: value.dni),
@@ -4604,7 +4676,10 @@ class ApiClient implements SegmentBackendClient {
   }
 
   Future<List<Patient>> fetchPatients() async {
-    final data = await _get(_isAdmin ? '/admin/patients' : '/patients');
+    // A consultation can only be created for a patient managed by the
+    // authenticated doctor. The admin endpoint includes other doctors'
+    // patients, which are intentionally rejected by /consultations/start.
+    final data = await _get('/patients');
     final items = _itemsFrom(data, 'patients');
 
     return items

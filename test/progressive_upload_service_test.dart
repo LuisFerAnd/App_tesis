@@ -118,6 +118,20 @@ void main() {
     },
   );
 
+  test('conserva el motivo devuelto al fallar el inicio remoto', () async {
+    backend.startError = const ApiStartTestException(
+      'El paciente no está disponible para este médico.',
+    );
+
+    final started = await begin();
+
+    expect(started, isFalse);
+    expect(
+      service.sessionStartError,
+      'El paciente no está disponible para este médico.',
+    );
+  });
+
   test('no reactiva automáticamente un segmento que ya falló', () async {
     await begin();
     store.segments.add(
@@ -633,6 +647,7 @@ class FakeConnectivity implements ConnectivityMonitor {
 class FakeSegmentBackend implements SegmentBackendClient {
   final uploaded = <LocalAudioSegment>[];
   bool failUploads = false;
+  Object? startError;
   int? finalizedExpectedSegments;
   String? receivedLocalCode;
   bool? receivedCreatedOffline;
@@ -659,6 +674,7 @@ class FakeSegmentBackend implements SegmentBackendClient {
     required String localConsultationCode,
     required bool createdOffline,
   }) async {
+    if (startError case final error?) throw error;
     receivedLocalCode = localConsultationCode;
     receivedCreatedOffline = createdOffline;
     return BackendRecordingSession(
@@ -706,4 +722,13 @@ class FakeSegmentBackend implements SegmentBackendClient {
     required String code,
     required String message,
   }) async {}
+}
+
+class ApiStartTestException implements Exception {
+  const ApiStartTestException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }
