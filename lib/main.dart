@@ -1569,6 +1569,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     if (isRecording) {
       await _stopRecording(autoGenerateSoap: false);
     }
+    await recordingService.discardRecoveredSession();
 
     if (!mounted) return;
     processingPollTimer?.cancel();
@@ -1592,6 +1593,25 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
     });
     processingSnapshotNotifier.value = null;
     await _clearDraft();
+  }
+
+  Future<void> _selectPatient(Patient patient) async {
+    final previousPatient = selectedPatient;
+    if (previousPatient?.id == patient.id) {
+      if (previousPatient != null && !_samePatient(previousPatient, patient)) {
+        setState(() => selectedPatient = patient);
+        unawaited(_persistDraft());
+      }
+      return;
+    }
+
+    if (previousPatient != null) {
+      await _newConsultation();
+      if (!mounted) return;
+    }
+
+    setState(() => selectedPatient = patient);
+    unawaited(_persistDraft());
   }
 
   Future<void> _generateSoapFromAudioSegments(List<String> audioPaths) async {
@@ -1858,18 +1878,7 @@ class _AiConsultationScreenState extends State<AiConsultationScreen>
                 !recordingService.controlsLocked &&
                 !isStartingRecording &&
                 !isGeneratingSummary,
-            onSelected: (patient) {
-              setState(() {
-                selectedPatient = patient;
-                generatedPdfPath = null;
-                pdfGenerationDuration = null;
-                generatedTranscript = null;
-                generatedSoapNote = null;
-                isConsultationSaved = false;
-                savedConsultationId = null;
-              });
-              unawaited(_persistDraft());
-            },
+            onSelected: (patient) => unawaited(_selectPatient(patient)),
           ),
           if (patient != null) ...[
             const SizedBox(height: 16),
@@ -3318,7 +3327,7 @@ class SoapPdfGenerator {
           pw.SizedBox(height: 8),
           _metadataRow('Nombre', patient.name),
           _metadataRow('DNI', patient.dni),
-          _metadataRow('Fecha de consulta', _formatDateTime(recordedAt)),
+          _metadataRow('Fecha de consulta', _formatDate(recordedAt)),
           _metadataRow('Duracion de audio', _formatDuration(audioDuration)),
           _metadataRow(
             'Grabacion',
@@ -5216,6 +5225,15 @@ String _formatDateTime(DateTime value) {
   final minute = localValue.minute.toString().padLeft(2, '0');
 
   return '$day/$month/$year $hour:$minute';
+}
+
+String _formatDate(DateTime value) {
+  final localValue = value.toLocal();
+  final day = localValue.day.toString().padLeft(2, '0');
+  final month = localValue.month.toString().padLeft(2, '0');
+  final year = localValue.year.toString();
+
+  return '$day/$month/$year';
 }
 
 String _timestampForFile(DateTime value) {
